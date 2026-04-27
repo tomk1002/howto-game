@@ -12,14 +12,44 @@ Tradeoff:
   appear in the recording.
 """
 
+import glob
 import os
 import shutil
 import subprocess
 from PyQt6.QtCore import QObject, pyqtSignal
 
 
+def find_ffmpeg():
+    """Locate ffmpeg.exe. Tries PATH first, then known winget install paths."""
+    found = shutil.which('ffmpeg')
+    if found:
+        return found
+
+    candidates = []
+    local = os.environ.get('LOCALAPPDATA')
+    if local:
+        # winget shim
+        candidates.append(os.path.join(local, 'Microsoft', 'WinGet', 'Links', 'ffmpeg.exe'))
+        # Gyan.FFmpeg package install (version varies)
+        candidates.extend(
+            glob.glob(os.path.join(local, 'Microsoft', 'WinGet', 'Packages', 'Gyan.FFmpeg*', '**', 'ffmpeg.exe'),
+                      recursive=True)
+        )
+    # Chocolatey default
+    candidates.append(r'C:\ProgramData\chocolatey\bin\ffmpeg.exe')
+    # Scoop default
+    home = os.environ.get('USERPROFILE')
+    if home:
+        candidates.append(os.path.join(home, 'scoop', 'shims', 'ffmpeg.exe'))
+
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
 def is_ffmpeg_available():
-    return shutil.which('ffmpeg') is not None
+    return find_ffmpeg() is not None
 
 
 def _even(n):
@@ -46,8 +76,9 @@ class ScreenRecorder(QObject):
     def start(self, output_path: str, *, x: int, y: int, width: int, height: int, fps: int = 30):
         if self._process is not None:
             return
-        if not is_ffmpeg_available():
-            self.failed.emit('ffmpeg not found in PATH. winget install Gyan.FFmpeg')
+        ffmpeg_path = find_ffmpeg()
+        if not ffmpeg_path:
+            self.failed.emit('ffmpeg not found in PATH or winget locations. winget install Gyan.FFmpeg')
             return
 
         width = _even(width)
@@ -59,7 +90,7 @@ class ScreenRecorder(QObject):
         os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
 
         cmd = [
-            'ffmpeg',
+            ffmpeg_path,
             '-y',
             '-loglevel', 'error',
             '-f', 'gdigrab',

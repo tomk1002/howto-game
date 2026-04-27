@@ -1,5 +1,8 @@
 """Enumerate visible windows for the screen-capture target picker."""
 
+import ctypes
+from ctypes import wintypes
+
 import win32gui
 import win32process
 
@@ -12,21 +15,76 @@ _BLOCKLIST_TITLES = {
     'Windows Shell Experience Host',
 }
 
+# DwmGetWindowAttribute / DWMWA_EXTENDED_FRAME_BOUNDS returns the visible window
+# rectangle without the invisible drop-shadow padding that GetWindowRect adds on
+# Windows Vista+ (typically 7~8 px sides + bottom). Using this prevents the
+# capture region from extending past the actual window edges.
+_DWMWA_EXTENDED_FRAME_BOUNDS = 9
 
-def get_window_bounds(hwnd):
-    """Return (x, y, width, height) for the window. None if minimized/invalid."""
+
+class _RECT(ctypes.Structure):
+    _fields_ = [
+        ('left', ctypes.c_long),
+        ('top', ctypes.c_long),
+        ('right', ctypes.c_long),
+        ('bottom', ctypes.c_long),
+    ]
+
+
+def _dwm_extended_frame_bounds(hwnd):
+    rect = _RECT()
     try:
-        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+        hresult = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            wintypes.HWND(hwnd),
+            ctypes.c_uint(_DWMWA_EXTENDED_FRAME_BOUNDS),
+            ctypes.byref(rect),
+            ctypes.sizeof(rect),
+        )
+    except (OSError, AttributeError):
+        return None
+    if hresult != 0:
+        return None
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def _client_bounds(hwnd):
+    """Client area in screen coords: excludes title bar, borders, shadow."""
+    try:
+        cl, ct, cr, cb = win32gui.GetClientRect(hwnd)
+        cw, ch = cr - cl, cb - ct
+        if cw <= 0 or ch <= 0:
+            return None
+        sx, sy = win32gui.ClientToScreen(hwnd, (cl, ct))
+        return (sx, sy, cw, ch)
     except Exception:
         return None
-    width = right - left
-    height = bottom - top
+
+
+def get_window_bounds(hwnd):
+    """Return (x, y, width, height) for the visible content area.
+
+    Tries client area first (excludes title bar/border — best for game capture),
+    falls back to DWM extended frame bounds (no shadow padding), then to plain
+    GetWindowRect.
+    """
+    bounds = _client_bounds(hwnd)
+    if bounds is None:
+        coords = _dwm_extended_frame_bounds(hwnd)
+        if coords is None:
+            try:
+                coords = win32gui.GetWindowRect(hwnd)
+            except Exception:
+                return None
+        left, top, right, bottom = coords
+        bounds = (left, top, right - left, bottom - top)
+
+    x, y, width, height = bounds
     if width <= 0 or height <= 0:
         return None
-    # minimized windows have negative coords like -32000
-    if left <= -10000 or top <= -10000:
+    # minimized windows have coords near -32000
+    if x <= -10000 or y <= -10000:
         return None
-    return (left, top, width, height)
+    return (x, y, width, height)
 
 
 def list_visible_windows():

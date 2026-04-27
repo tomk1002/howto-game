@@ -178,7 +178,15 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage('대상 창이 최소화/이동됨 — 영상 없이 입력만 녹화')
             return
         x, y, width, height = bounds
-        self._capture_bounds = bounds
+        # Inset by a few pixels to crop out anti-cheat / capture-indicator borders
+        # that some games (e.g., Vanguard) draw on the window frame itself.
+        inset = 3
+        if width > 2 * inset and height > 2 * inset:
+            x += inset
+            y += inset
+            width -= 2 * inset
+            height -= 2 * inset
+        self._capture_bounds = (x, y, width, height)
         self._capture_window_title = info['title']
         RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
