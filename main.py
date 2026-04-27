@@ -1,12 +1,12 @@
 import sys
 from PyQt6.QtWidgets import QApplication
 
-from combo_trainer.app import MainWindow
+from howto.app import MainWindow
 
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName('combo-trainer')
+    app.setApplicationName('HowTo')
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

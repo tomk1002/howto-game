@@ -6,7 +6,7 @@ FORMAT_VERSION = 1
 
 
 def save(events, path, *, title='', game='', tags=None):
-    """Save events to a JSON file using the standard combo-trainer format."""
+    """Save events to a JSON file using the standard HowTo format."""
     duration_ms = max((e.get('t_ms', 0) for e in events), default=0)
     data = {
         'version': FORMAT_VERSION,
@@ -24,9 +24,9 @@ def save(events, path, *, title='', game='', tags=None):
 
 
 def load(path):
-    """Load a combo-trainer JSON file. Returns the parsed dict."""
+    """Load a HowTo JSON file. Returns the parsed dict."""
     with open(path, 'r', encoding='utf-8') as f:
         data = json.load(f)
     if not isinstance(data, dict) or 'events' not in data:
-        raise ValueError(f"invalid combo-trainer file: {path}")
+        raise ValueError(f"invalid HowTo file: {path}")
     return data
