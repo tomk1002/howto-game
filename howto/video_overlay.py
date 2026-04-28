@@ -34,6 +34,8 @@ class VideoOverlayWindow(QWidget):
         self.audio = QAudioOutput()
         self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.video_widget)
+        # Auto-loop so the user can keep practicing without alt-tabbing back.
+        self.player.setLoops(QMediaPlayer.Loops.Infinite)
 
         if video_path and os.path.exists(video_path):
             self.player.setSource(QUrl.fromLocalFile(os.path.abspath(video_path)))

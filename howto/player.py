@@ -30,6 +30,15 @@ from PyQt6.QtWidgets import (
 from pynput import keyboard, mouse
 
 
+# Empirical compensation for ffmpeg gdigrab startup latency. The input
+# recorder logs t_ms relative to its own start, but ffmpeg only begins
+# capturing ~300ms later, so video position 0 corresponds to recorder
+# time SYNC_OFFSET_MS rather than 0. Adding this to the video position
+# before looking up the current step pulls the highlight back into sync
+# with what's actually shown on screen.
+SYNC_OFFSET_MS = 500
+
+
 def _extract_steps(events):
     out = []
     for e in events:
@@ -409,13 +418,22 @@ class PlayerWindow(QWidget):
         if not self._playing or self._start_time is None:
             return
         elapsed_ms = int((time.perf_counter() - self._start_time) * 1000)
+        end_ms = (self.steps[-1]['t_ms'] + 800) if self.steps else 1000
+        if elapsed_ms > end_ms:
+            # auto-loop — restart from 0 without stopping the timer
+            self._start_time = time.perf_counter()
+            self.timeline_strip.clear_user_inputs()
+            elapsed_ms = 0
         self.timeline_strip.set_playhead(elapsed_ms)
-        if self.steps and elapsed_ms > self.steps[-1]['t_ms'] + 800:
-            self._stop()
 
     # External (video) time source
     def _on_external_position(self, ms):
-        self.timeline_strip.set_playhead(int(ms))
+        new_t = int(ms) + SYNC_OFFSET_MS
+        # When the video loops, position drops sharply backward — clear user
+        # marks from the previous run so the new loop starts clean.
+        if new_t + 100 < self.timeline_strip.playhead_ms:
+            self.timeline_strip.clear_user_inputs()
+        self.timeline_strip.set_playhead(new_t)
 
     def _on_external_state(self, state):
         if state == QMediaPlayer.PlaybackState.PlayingState:
