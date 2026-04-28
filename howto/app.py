@@ -31,6 +31,8 @@ from .timeline import TimelineWidget
 from .windows import list_visible_windows, get_window_bounds
 from .screen_recorder import ScreenRecorder, is_ffmpeg_available
 from .event_list import EventListView
+from .player import PlayerWindow
+from .video_overlay import VideoOverlayWindow
 
 
 RECORDINGS_DIR = Path('recordings')
@@ -61,6 +63,8 @@ class MainWindow(QMainWindow):
         self._video_path = None  # path currently loaded in player
         self._loaded_video_meta = None  # video_meta from loaded JSON, preserved across save
         self._history = deque(maxlen=20)
+        self._overlay_window = None  # PlayerWindow (held to prevent GC)
+        self._video_overlay_window = None  # VideoOverlayWindow
 
         self._build_ui()
         self._refresh_windows()
@@ -115,7 +119,10 @@ class MainWindow(QMainWindow):
         self.btn_save.clicked.connect(self._save)
         self.btn_load = QPushButton('불러오기…')
         self.btn_load.clicked.connect(self._load)
-        for b in (self.btn_record, self.btn_clear, self.btn_save, self.btn_load):
+        self.btn_overlay = QPushButton('🎯 오버레이 재생')
+        self.btn_overlay.setToolTip('항상 위에 떠 있는 콤보 시퀀스 + 입력 트래커 창 열기')
+        self.btn_overlay.clicked.connect(self._open_overlay)
+        for b in (self.btn_record, self.btn_clear, self.btn_save, self.btn_load, self.btn_overlay):
             btns.addWidget(b)
         btns.addStretch(1)
         self.lbl_count = QLabel('이벤트 0')
@@ -345,7 +352,7 @@ class MainWindow(QMainWindow):
     def _refresh_button_state(self, recording):
         self.btn_record.setText('정지 (F9)' if recording else '녹화 (F9)')
         non_record = [
-            self.btn_clear, self.btn_save, self.btn_load,
+            self.btn_clear, self.btn_save, self.btn_load, self.btn_overlay,
             self.btn_del, self.btn_trim_start, self.btn_trim_end,
             self.btn_keep_range, self.btn_remove_releases,
             self.btn_remove_same_key, self.btn_undo,
@@ -553,6 +560,43 @@ class MainWindow(QMainWindow):
         self._refresh_after_edit('실행취소')
 
     # =====================================================================
+    # Overlay player
+    # =====================================================================
+
+    def _open_overlay(self):
+        if not self.recorder.events:
+            self.statusBar().showMessage('재생할 이벤트가 없습니다. 먼저 녹화하거나 불러오세요.')
+            return
+        # close existing overlays before opening new
+        for attr in ('_overlay_window', '_video_overlay_window'):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    w.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+        title = self.title_input.text() or '콤보'
+        media_player = None
+
+        # If a video is loaded, open the video overlay first and link its
+        # QMediaPlayer to the sequence overlay so they share a time source.
+        if self._video_path and os.path.exists(self._video_path):
+            self._video_overlay_window = VideoOverlayWindow(self._video_path, title=title)
+            self._video_overlay_window.show()
+            media_player = self._video_overlay_window.player
+
+        self._overlay_window = PlayerWindow(
+            self.recorder.events, title=title, media_player=media_player
+        )
+        # position sequence window next to video window
+        if self._video_overlay_window is not None:
+            geom = self._video_overlay_window.geometry()
+            self._overlay_window.move(geom.x() + geom.width() + 12, geom.y())
+        self._overlay_window.show()
+
+    # =====================================================================
     # Main actions
     # =====================================================================
 
@@ -688,6 +732,9 @@ class MainWindow(QMainWindow):
                 self.screen_recorder.stop()
             self.hotkey.stop()
             self.player.stop()
+            for w in (self._overlay_window, self._video_overlay_window):
+                if w is not None:
+                    w.close()
         except Exception:
             pass
         super().closeEvent(event)
