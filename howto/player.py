@@ -121,22 +121,19 @@ class TimelineStrip(QWidget):
 
     MARGIN_X = 12
     LANE_TOP_Y = 12
-    BOX_HEIGHT = 26
-    BOX_WIDTH = 32
+    BASE_BOX_HEIGHT = 26
+    BASE_BOX_WIDTH = 32
     LANE_GAP = 4
     USER_LANE_GAP = 16
     DEFAULT_LANE_RESERVE = 3   # how many lanes minHeight reserves room for
 
+    SCALE_STEPS = (0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0)
+    DEFAULT_SCALE_INDEX = 1  # 1.0x
+
     def __init__(self):
         super().__init__()
-        h = (
-            self.LANE_TOP_Y
-            + self.DEFAULT_LANE_RESERVE * (self.BOX_HEIGHT + self.LANE_GAP)
-            + 6
-            + self.USER_LANE_GAP
-            + 26
-        )
-        self.setMinimumHeight(h)
+        self._scale_idx = self.DEFAULT_SCALE_INDEX
+        self._update_min_height()
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.steps = []
         self.duration_ms = 1000
@@ -144,6 +141,38 @@ class TimelineStrip(QWidget):
         self.current_step = -1
         self.user_inputs = []  # list of {t_ms, label}
         self.key_icons = {}  # mapping from uppercase key label -> QPixmap
+
+    @property
+    def scale(self):
+        return self.SCALE_STEPS[self._scale_idx]
+
+    @property
+    def BOX_WIDTH(self):
+        return int(self.BASE_BOX_WIDTH * self.scale)
+
+    @property
+    def BOX_HEIGHT(self):
+        return int(self.BASE_BOX_HEIGHT * self.scale)
+
+    def adjust_scale(self, delta):
+        new_idx = max(0, min(len(self.SCALE_STEPS) - 1, self._scale_idx + delta))
+        if new_idx == self._scale_idx:
+            return False
+        self._scale_idx = new_idx
+        self._update_min_height()
+        self.updateGeometry()
+        self.update()
+        return True
+
+    def _update_min_height(self):
+        h = (
+            self.LANE_TOP_Y
+            + self.DEFAULT_LANE_RESERVE * (self.BOX_HEIGHT + self.LANE_GAP)
+            + 6
+            + self.USER_LANE_GAP
+            + max(26, int(20 * self.scale))
+        )
+        self.setMinimumHeight(h)
 
     def set_key_icons(self, icons):
         """icons: dict mapping uppercase key labels (e.g. 'Q') to QPixmap."""
@@ -180,6 +209,23 @@ class TimelineStrip(QWidget):
 
     def _x_for(self, t_ms, plot_w):
         return self.MARGIN_X + (t_ms / self.duration_ms) * plot_w
+
+    @staticmethod
+    def _draw_label_on_icon(painter, box, text, font, is_past):
+        """Overlay the key label semi-transparently over an icon. Outline + fill
+        so the text stays legible on any spell art."""
+        if not text:
+            return
+        painter.save()
+        painter.setOpacity(0.45 if is_past else 0.78)
+        painter.setFont(font)
+        # cheap 4-direction outline — black halo behind white fill
+        painter.setPen(QColor(0, 0, 0, 230))
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            painter.drawText(box.translated(dx, dy), Qt.AlignmentFlag.AlignCenter, text)
+        painter.setPen(QColor(255, 255, 255, 240))
+        painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
+        painter.restore()
 
     def _assign_lanes(self, plot_w):
         """Greedy left-to-right lane packing — return per-step lane index."""
@@ -232,7 +278,9 @@ class TimelineStrip(QWidget):
             painter.drawText(x + 2, self.height() - 4, f'{t / 1000:.0f}s')
 
         # --- step boxes (with lane stacking) ---
-        painter.setFont(QFont('Consolas', 11, QFont.Weight.Bold))
+        text_pt = max(9, int(11 * self.scale))
+        text_font = QFont('Consolas', text_pt, QFont.Weight.Bold)
+        painter.setFont(text_font)
         for i, s in enumerate(self.steps):
             lane = step_lanes[i]
             cx = self._x_for(s['t_ms'], plot_w)
@@ -243,6 +291,7 @@ class TimelineStrip(QWidget):
             is_past = (self.playhead_ms > s['t_ms']) and not is_current
 
             label = _format_input(s['input'])
+            text = label[:4]
             # priority: per-event icon > per-key mapping > none
             icon = s.get('icon_pixmap') or self.key_icons.get(label.upper())
 
@@ -253,7 +302,7 @@ class TimelineStrip(QWidget):
                     painter.setOpacity(0.35)
                 elif not is_current:
                     painter.setOpacity(0.85)
-                pad = 3
+                pad = max(2, int(3 * self.scale))
                 w = int(self.BOX_WIDTH - pad * 2)
                 h = int(self.BOX_HEIGHT - pad * 2)
                 scaled = icon.scaled(
@@ -265,6 +314,8 @@ class TimelineStrip(QWidget):
                 ty = y + (self.BOX_HEIGHT - scaled.height()) / 2
                 painter.drawPixmap(int(tx), int(ty), scaled)
                 painter.restore()
+                # key label overlay — semi-transparent on top of icon
+                self._draw_label_on_icon(painter, box, text, text_font, is_past)
                 # state border (drawn at full opacity over the icon)
                 if is_current:
                     painter.setPen(QPen(COLOR_STEP_CURRENT_BORDER, 2))
@@ -274,6 +325,7 @@ class TimelineStrip(QWidget):
                     painter.setPen(QPen(COLOR_STEP_PAST_BORDER, 1))
                     painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
                     painter.drawRoundedRect(box, 5, 5)
+                painter.setFont(text_font)
             else:
                 # text fallback (no icon for this key)
                 if is_current:
@@ -286,7 +338,7 @@ class TimelineStrip(QWidget):
                 painter.setPen(QPen(border, 1.5))
                 painter.drawRoundedRect(box, 5, 5)
                 painter.setPen(QPen(text_color))
-                painter.drawText(box, Qt.AlignmentFlag.AlignCenter, label[:4])
+                painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
         # --- user input markers (under axis) ---
         painter.setFont(QFont('Consolas', 9))
@@ -406,6 +458,16 @@ class PlayerWindow(QWidget):
         self.btn_reset.setToolTip('처음으로')
         self.btn_reset.clicked.connect(self._reset)
         header.addWidget(self.btn_reset)
+        self.btn_zoom_out = QPushButton('−')
+        self.btn_zoom_out.setFixedSize(22, 22)
+        self.btn_zoom_out.setToolTip('아이콘 작게')
+        self.btn_zoom_out.clicked.connect(lambda: self._zoom(-1))
+        header.addWidget(self.btn_zoom_out)
+        self.btn_zoom_in = QPushButton('+')
+        self.btn_zoom_in.setFixedSize(22, 22)
+        self.btn_zoom_in.setToolTip('아이콘 크게')
+        self.btn_zoom_in.clicked.connect(lambda: self._zoom(1))
+        header.addWidget(self.btn_zoom_in)
         self.btn_close = QPushButton('✕')
         self.btn_close.setFixedSize(22, 22)
         self.btn_close.clicked.connect(self.close)
@@ -421,6 +483,14 @@ class PlayerWindow(QWidget):
     # ------------------------------------------------------------------
     # Playback control
     # ------------------------------------------------------------------
+
+    def _zoom(self, delta):
+        if not self.timeline_strip.adjust_scale(delta):
+            return
+        # If the window is smaller than the strip's new minimum, grow it.
+        needed = self.timeline_strip.minimumHeight() + 50  # header + margins
+        if self.height() < needed:
+            self.resize(self.width(), needed)
 
     def _toggle_play(self):
         if self._media_player is not None:
