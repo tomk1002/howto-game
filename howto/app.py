@@ -29,10 +29,23 @@ from .recorder import Recorder, HotkeyToggle
 from .storage import save as save_combo, load as load_combo
 from .timeline import TimelineWidget
 from .windows import list_visible_windows, get_window_bounds
-from .screen_recorder import ScreenRecorder, is_ffmpeg_available
+from .screen_recorder import ScreenRecorder, is_ffmpeg_available, apply_crop
 from .event_list import EventListView
 from .player import PlayerWindow
 from .video_overlay import VideoOverlayWindow
+from .crop_dialog import CropDialog
+from .resources_loader import (
+    champion_choices,
+    champion_skill_icons,
+    manifest_available,
+    path_to_relative,
+    path_to_absolute,
+    PROJECT_ROOT,
+    RESOURCES_DIR,
+)
+from .key_mapping_dialog import KeyMappingDialog, unique_keys
+
+from PyQt6.QtGui import QPixmap
 
 
 RECORDINGS_DIR = Path('recordings')
@@ -65,6 +78,8 @@ class MainWindow(QMainWindow):
         self._history = deque(maxlen=20)
         self._overlay_window = None  # PlayerWindow (held to prevent GC)
         self._video_overlay_window = None  # VideoOverlayWindow
+        self._crop_rect = None  # (x, y, w, h) in source video pixels, applied on save
+        self._manual_key_icons = {}  # {KEY: image path} — overrides champion auto-icons
 
         self._build_ui()
         self._refresh_windows()
@@ -92,6 +107,19 @@ class MainWindow(QMainWindow):
         self.game_input.setPlaceholderText('예: League of Legends')
         form.addRow('제목', self.title_input)
         form.addRow('게임', self.game_input)
+
+        # Champion picker (only useful if DDragon manifest is available)
+        self.champion_combo = QComboBox()
+        self.champion_combo.addItem('— 선택 안 함 —', userData='')
+        if manifest_available():
+            for display, cid in champion_choices():
+                self.champion_combo.addItem(f'{display}  ({cid})', userData=cid)
+        else:
+            self.champion_combo.setEnabled(False)
+            self.champion_combo.setToolTip(
+                'resources/manifest.json 없음 — `python tools/download_ddragon.py` 로 받으세요'
+            )
+        form.addRow('챔피언 (LoL)', self.champion_combo)
 
         target_row = QHBoxLayout()
         self.window_combo = QComboBox()
@@ -122,9 +150,21 @@ class MainWindow(QMainWindow):
         self.btn_overlay = QPushButton('🎯 오버레이 재생')
         self.btn_overlay.setToolTip('항상 위에 떠 있는 콤보 시퀀스 + 입력 트래커 창 열기')
         self.btn_overlay.clicked.connect(self._open_overlay)
-        for b in (self.btn_record, self.btn_clear, self.btn_save, self.btn_load, self.btn_overlay):
+        self.btn_crop = QPushButton('🖼 크롭 설정')
+        self.btn_crop.setToolTip('영상의 캡처 영역을 줄여서 캐릭터 부분만 강조 (저장 시 ffmpeg로 재인코딩)')
+        self.btn_crop.clicked.connect(self._open_crop_dialog)
+        self.btn_crop_clear = QPushButton('크롭 해제')
+        self.btn_crop_clear.clicked.connect(self._clear_crop)
+        self.btn_keymap = QPushButton('🔧 키 아이콘 매핑…')
+        self.btn_keymap.setToolTip('각 키에 사용할 아이콘 이미지를 직접 지정 (자동 매핑 위에 덮어씀)')
+        self.btn_keymap.clicked.connect(self._open_keymap_dialog)
+        for b in (self.btn_record, self.btn_clear, self.btn_save, self.btn_load,
+                  self.btn_overlay, self.btn_crop, self.btn_crop_clear, self.btn_keymap):
             btns.addWidget(b)
         btns.addStretch(1)
+        self.lbl_crop = QLabel('크롭 없음')
+        self.lbl_crop.setStyleSheet('color: #6b7280;')
+        btns.addWidget(self.lbl_crop)
         self.lbl_count = QLabel('이벤트 0')
         btns.addWidget(self.lbl_count)
         root.addLayout(btns)
@@ -198,12 +238,21 @@ class MainWindow(QMainWindow):
             '선택한 첫 이벤트의 키 / 버튼 이름과 일치하는 모든 이벤트 제거 (press + release)'
         )
         self.btn_remove_same_key.clicked.connect(self._delete_same_key)
+        self.btn_event_icon = QPushButton('🎨 아이콘 지정')
+        self.btn_event_icon.setToolTip(
+            '선택한 이벤트(들)에만 적용할 아이콘 이미지 지정 — 키별 매핑보다 우선'
+        )
+        self.btn_event_icon.clicked.connect(self._set_event_icon)
+        self.btn_event_icon_clear = QPushButton('아이콘 제거')
+        self.btn_event_icon_clear.setToolTip('선택 이벤트의 개별 아이콘 제거 (키 매핑·자동 매핑으로 복귀)')
+        self.btn_event_icon_clear.clicked.connect(self._clear_event_icon)
         self.btn_undo = QPushButton('↶ 실행취소')
         self.btn_undo.setToolTip('마지막 편집 되돌리기 (Ctrl+Z)')
         self.btn_undo.clicked.connect(self._undo)
         for b in (
             self.btn_del, self.btn_trim_start, self.btn_trim_end, self.btn_keep_range,
-            self.btn_remove_releases, self.btn_remove_same_key, self.btn_undo,
+            self.btn_remove_releases, self.btn_remove_same_key,
+            self.btn_event_icon, self.btn_event_icon_clear, self.btn_undo,
         ):
             edit_bar.addWidget(b)
         edit_bar.addStretch(1)
@@ -353,9 +402,12 @@ class MainWindow(QMainWindow):
         self.btn_record.setText('정지 (F9)' if recording else '녹화 (F9)')
         non_record = [
             self.btn_clear, self.btn_save, self.btn_load, self.btn_overlay,
+            self.btn_crop, self.btn_crop_clear, self.btn_keymap,
             self.btn_del, self.btn_trim_start, self.btn_trim_end,
             self.btn_keep_range, self.btn_remove_releases,
-            self.btn_remove_same_key, self.btn_undo,
+            self.btn_remove_same_key,
+            self.btn_event_icon, self.btn_event_icon_clear,
+            self.btn_undo,
         ]
         for b in non_record:
             b.setEnabled(not recording)
@@ -448,6 +500,15 @@ class MainWindow(QMainWindow):
             ref = self.recorder.events[indices[0]]
             first_has_key = bool(ref.get('key') or ref.get('button'))
         self.btn_remove_same_key.setEnabled(first_has_key and not recording)
+        # per-event icon buttons need press/click events selected
+        any_press_selected = False
+        for i in indices:
+            if self.recorder.events[i].get('type') in ('key_press', 'mouse_press'):
+                any_press_selected = True
+                break
+        self.btn_event_icon.setEnabled(any_press_selected and not recording)
+        any_has_icon = any(self.recorder.events[i].get('icon') for i in indices)
+        self.btn_event_icon_clear.setEnabled(any_has_icon and not recording)
         # bulk release removal — always available when there are events
         self.btn_remove_releases.setEnabled(bool(self.recorder.events) and not recording)
         self.btn_undo.setEnabled(bool(self._history) and not recording)
@@ -553,11 +614,150 @@ class MainWindow(QMainWindow):
         self.recorder.events = kept
         self._refresh_after_edit(f'"{ref_key}" 관련 {removed}개 제거')
 
+    def _set_event_icon(self):
+        if self.recorder.recording:
+            return
+        indices = [
+            i for i in self.event_list.selected_indices()
+            if self.recorder.events[i].get('type') in ('key_press', 'mouse_press')
+        ]
+        if not indices:
+            return
+        start_dir = str(RESOURCES_DIR) if RESOURCES_DIR.exists() else ''
+        path, _ = QFileDialog.getOpenFileName(
+            self, '이벤트 아이콘 선택', start_dir,
+            'Images (*.png *.jpg *.jpeg *.webp *.bmp);;All files (*)',
+        )
+        if not path:
+            return
+        pix = QPixmap(path)
+        if pix.isNull():
+            self.statusBar().showMessage('이미지 로드 실패')
+            return
+        self._push_history()
+        for i in indices:
+            self.recorder.events[i]['icon'] = path
+        self._refresh_after_edit(f'{len(indices)}개 이벤트에 아이콘 지정')
+
+    def _clear_event_icon(self):
+        if self.recorder.recording:
+            return
+        indices = self.event_list.selected_indices()
+        cleared = 0
+        for i in indices:
+            if 'icon' in self.recorder.events[i]:
+                cleared += 1
+        if cleared == 0:
+            return
+        self._push_history()
+        for i in indices:
+            self.recorder.events[i].pop('icon', None)
+        self._refresh_after_edit(f'{cleared}개 이벤트 아이콘 제거')
+
     def _undo(self):
         if self.recorder.recording or not self._history:
             return
         self.recorder.events = self._history.pop()
         self._refresh_after_edit('실행취소')
+
+    # =====================================================================
+    # Crop
+    # =====================================================================
+
+    def _video_resolution(self):
+        """Best-effort source resolution from current state."""
+        # Loaded JSON's video_meta.capture_bounds
+        meta = self._loaded_video_meta or {}
+        bounds = meta.get('capture_bounds') if isinstance(meta, dict) else None
+        if bounds and len(bounds) >= 4:
+            return (int(bounds[2]), int(bounds[3]))
+        # Fresh recording: self._capture_bounds = (x, y, w, h)
+        if self._capture_bounds and len(self._capture_bounds) == 4:
+            return (int(self._capture_bounds[2]), int(self._capture_bounds[3]))
+        return None
+
+    def _open_crop_dialog(self):
+        if self.recorder.recording:
+            return
+        # source video can be either freshly recorded (in recordings/) or loaded
+        source = self._completed_video_path
+        if not (source and os.path.exists(source)):
+            source = self._video_path
+        if not (source and os.path.exists(source)):
+            self.statusBar().showMessage('크롭할 영상이 없습니다. 녹화하거나 영상이 있는 .json 을 불러오세요.')
+            return
+        if not is_ffmpeg_available():
+            self.statusBar().showMessage('ffmpeg 미설치 — 크롭 불가')
+            return
+
+        size = self._video_resolution()
+        dlg = CropDialog(
+            source,
+            video_size=size,
+            initial_crop=self._crop_rect,
+            parent=self,
+        )
+        if dlg.exec():
+            crop = dlg.selected_crop()
+            self._crop_rect = crop
+            self._refresh_crop_label()
+            if crop:
+                self.statusBar().showMessage(
+                    f'크롭 설정됨: {crop[2]}×{crop[3]} @ ({crop[0]}, {crop[1]}) — 저장 시 적용'
+                )
+            else:
+                self.statusBar().showMessage('크롭 영역이 너무 작거나 전체와 동일 — 적용 안 됨')
+
+    def _clear_crop(self):
+        if self._crop_rect is None:
+            return
+        self._crop_rect = None
+        self._refresh_crop_label()
+        self.statusBar().showMessage('크롭 해제됨')
+
+    def _refresh_crop_label(self):
+        if self._crop_rect:
+            x, y, w, h = self._crop_rect
+            self.lbl_crop.setText(f'크롭: {w}×{h} @ ({x},{y})')
+            self.lbl_crop.setStyleSheet('color: #7ee787;')
+        else:
+            self.lbl_crop.setText('크롭 없음')
+            self.lbl_crop.setStyleSheet('color: #6b7280;')
+
+    # =====================================================================
+    # Manual key→icon mapping
+    # =====================================================================
+
+    def _build_key_icon_map(self):
+        """Final {KEY: QPixmap} = champion auto-icons overridden by manual mappings."""
+        cid = self.champion_combo.currentData() or ''
+        icons = dict(champion_skill_icons(cid)) if cid else {}
+        for key, path in self._manual_key_icons.items():
+            if not path or not os.path.exists(path):
+                continue
+            pix = QPixmap(path)
+            if not pix.isNull():
+                icons[key.upper()] = pix
+        return icons
+
+    def _open_keymap_dialog(self):
+        if self.recorder.recording or not self.recorder.events:
+            self.statusBar().showMessage('매핑할 이벤트가 없습니다.')
+            return
+        keys = unique_keys(self.recorder.events)
+        cid = self.champion_combo.currentData() or ''
+        base_icons = champion_skill_icons(cid) if cid else {}
+        dlg = KeyMappingDialog(
+            keys,
+            current_mappings=self._manual_key_icons,
+            base_icons=base_icons,
+            parent=self,
+        )
+        if dlg.exec():
+            self._manual_key_icons = dlg.mappings()
+            self.statusBar().showMessage(
+                f'키 매핑 {len(self._manual_key_icons)}개 적용 — 저장 시 함께 기록됨'
+            )
 
     # =====================================================================
     # Overlay player
@@ -587,8 +787,10 @@ class MainWindow(QMainWindow):
             self._video_overlay_window.show()
             media_player = self._video_overlay_window.player
 
+        key_icons = self._build_key_icon_map()
         self._overlay_window = PlayerWindow(
-            self.recorder.events, title=title, media_player=media_player
+            self.recorder.events, title=title,
+            media_player=media_player, key_icons=key_icons,
         )
         # position sequence window next to video window
         if self._video_overlay_window is not None:
@@ -613,6 +815,9 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass
         self._completed_video_path = None
+        self._crop_rect = None
+        self._refresh_crop_label()
+        self._manual_key_icons = {}
         self.statusBar().showMessage('비웠습니다.')
 
     def _save(self):
@@ -645,9 +850,19 @@ class MainWindow(QMainWindow):
         if source_video and os.path.exists(source_video):
             try:
                 src = Path(source_video).resolve()
-                # Move fresh recordings (out of recordings/ temp dir).
-                # Copy loaded videos so the original file isn't relocated.
-                if src != target_video.resolve():
+
+                if self._crop_rect is not None:
+                    # ffmpeg re-encode with crop filter; produces target_video directly.
+                    cx, cy, cw, ch = self._crop_rect
+                    self.statusBar().showMessage(f'크롭 인코딩 중 ({cw}×{ch})…')
+                    apply_crop(str(src), str(target_video), cx, cy, cw, ch)
+                    if is_fresh:
+                        # remove the uncropped temp recording
+                        try:
+                            os.remove(src)
+                        except OSError:
+                            pass
+                elif src != target_video.resolve():
                     if is_fresh:
                         shutil.move(str(src), str(target_video))
                     else:
@@ -663,17 +878,35 @@ class MainWindow(QMainWindow):
                             'capture_bounds': list(self._capture_bounds or ()),
                         }
                     else:
-                        # Preserve metadata from the loaded JSON.
                         video_meta = dict(self._loaded_video_meta) if self._loaded_video_meta else None
+                        if video_meta is None:
+                            video_meta = {}
+                    if self._crop_rect is not None:
+                        video_meta['crop_applied'] = list(self._crop_rect)
                     if is_fresh:
                         self._completed_video_path = None
-            except OSError as exc:
+            except (OSError, RuntimeError) as exc:
                 self.statusBar().showMessage(f'영상 처리 실패: {exc}')
 
+        # Persist key icons + per-event icons with relative paths when possible.
+        portable_key_icons = {
+            k: path_to_relative(p) for k, p in self._manual_key_icons.items()
+        }
+        portable_events = []
+        for e in self.recorder.events:
+            if 'icon' in e and e['icon']:
+                e2 = dict(e)
+                e2['icon'] = path_to_relative(e2['icon'])
+                portable_events.append(e2)
+            else:
+                portable_events.append(e)
+
         save_combo(
-            self.recorder.events, path,
+            portable_events, path,
             title=self.title_input.text(),
             game=self.game_input.text(),
+            champion_id=self.champion_combo.currentData() or '',
+            key_icons=portable_key_icons,
             video_file=video_file_rel,
             video_meta=video_meta,
         )
@@ -702,7 +935,33 @@ class MainWindow(QMainWindow):
             return
         self.title_input.setText(data.get('title', ''))
         self.game_input.setText(data.get('game', ''))
-        self.recorder.events = list(data.get('events', []))
+        # restore champion selection if present in JSON
+        champ_id = data.get('champion_id', '')
+        if champ_id:
+            for i in range(self.champion_combo.count()):
+                if self.champion_combo.itemData(i) == champ_id:
+                    self.champion_combo.setCurrentIndex(i)
+                    break
+        else:
+            self.champion_combo.setCurrentIndex(0)
+        # restore manual key→icon mappings; resolve relative paths against PROJECT_ROOT
+        loaded_map = data.get('key_icons', {}) or {}
+        self._manual_key_icons = {}
+        for k, stored in loaded_map.items():
+            if not isinstance(stored, str) or not stored:
+                continue
+            absolute = path_to_absolute(stored)
+            if os.path.exists(absolute):
+                self._manual_key_icons[k] = absolute
+        loaded_events = list(data.get('events', []))
+        for e in loaded_events:
+            if e.get('icon'):
+                resolved = path_to_absolute(e['icon'])
+                if os.path.exists(resolved):
+                    e['icon'] = resolved
+                else:
+                    e.pop('icon', None)
+        self.recorder.events = loaded_events
         self._history.clear()
         self.timeline.set_events(self.recorder.events)
         self.event_list.set_events(self.recorder.events)
@@ -716,6 +975,9 @@ class MainWindow(QMainWindow):
             if video_path.exists():
                 self._load_video(str(video_path))
                 self._loaded_video_meta = data.get('video_meta')
+        # reset transient crop state on load
+        self._crop_rect = None
+        self._refresh_crop_label()
 
         msg = (
             f"불러옴: {Path(path).name} ({len(self.recorder.events)}개 이벤트, "

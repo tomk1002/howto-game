@@ -58,6 +58,41 @@ def _even(n):
     return n - (n % 2)
 
 
+def apply_crop(src_path, dst_path, x, y, w, h):
+    """Re-encode src_path to dst_path applying a `crop=W:H:X:Y` filter.
+
+    Returns True on success. Raises RuntimeError on ffmpeg failure / missing binary.
+    """
+    ffmpeg = find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError('ffmpeg not found')
+    if not os.path.exists(src_path):
+        raise RuntimeError(f'source not found: {src_path}')
+    w = _even(w)
+    h = _even(h)
+    if w < 16 or h < 16:
+        raise RuntimeError(f'crop region too small: {w}x{h}')
+
+    cmd = [
+        ffmpeg, '-y', '-loglevel', 'error',
+        '-i', src_path,
+        '-vf', f'crop={w}:{h}:{int(x)}:{int(y)}',
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-pix_fmt', 'yuv420p',
+        '-crf', '23',
+        '-an',  # the recorded videos have no audio
+        dst_path,
+    ]
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+    )
+    if proc.returncode != 0 or not os.path.exists(dst_path):
+        raise RuntimeError(f'ffmpeg crop failed: {proc.stderr.strip().splitlines()[-1] if proc.stderr else proc.returncode}')
+    return True
+
+
 class ScreenRecorder(QObject):
     started = pyqtSignal()
     stopped = pyqtSignal(str)

@@ -6,6 +6,7 @@ venv/
 .env
 data/
 recordings/
+resources/
 *.spec
 build/
 dist/

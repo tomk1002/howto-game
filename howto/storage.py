@@ -5,7 +5,8 @@ from pathlib import Path
 FORMAT_VERSION = 1
 
 
-def save(events, path, *, title='', game='', tags=None, video_file=None, video_meta=None):
+def save(events, path, *, title='', game='', tags=None, video_file=None,
+         video_meta=None, champion_id='', key_icons=None):
     """Save events to a JSON file using the standard HowTo format."""
     duration_ms = max((e.get('t_ms', 0) for e in events), default=0)
     data = {
@@ -17,6 +18,10 @@ def save(events, path, *, title='', game='', tags=None, video_file=None, video_m
         'created_at': datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z'),
         'events': list(events),
     }
+    if champion_id:
+        data['champion_id'] = champion_id
+    if key_icons:
+        data['key_icons'] = dict(key_icons)
     if video_file:
         data['video_file'] = video_file
     if video_meta:

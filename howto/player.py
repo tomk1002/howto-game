@@ -14,9 +14,10 @@ Layout (top → bottom):
 No game input is injected. The overlay is purely visual.
 """
 
+import os
 import time
 from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
 from PyQt6.QtMultimedia import QMediaPlayer
 from PyQt6.QtWidgets import (
     QWidget,
@@ -28,6 +29,9 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
 )
 from pynput import keyboard, mouse
+
+from .frameless import handle_resize_press, handle_resize_move
+from .resources_loader import path_to_absolute
 
 
 # Empirical compensation for ffmpeg gdigrab startup latency. The input
@@ -44,11 +48,20 @@ def _extract_steps(events):
     for e in events:
         if e.get('type') not in ('key_press', 'mouse_press'):
             continue
-        out.append({
+        step = {
             't_ms': int(e.get('t_ms', 0)),
             'input': e.get('key') or e.get('button') or '?',
             'type': e['type'],
-        })
+        }
+        # Per-event icon override (highest priority at render time)
+        icon_path = e.get('icon')
+        if icon_path:
+            absolute = path_to_absolute(icon_path)
+            if os.path.exists(absolute):
+                pix = QPixmap(absolute)
+                if not pix.isNull():
+                    step['icon_pixmap'] = pix
+        out.append(step)
     return out
 
 
@@ -130,6 +143,12 @@ class TimelineStrip(QWidget):
         self.playhead_ms = 0
         self.current_step = -1
         self.user_inputs = []  # list of {t_ms, label}
+        self.key_icons = {}  # mapping from uppercase key label -> QPixmap
+
+    def set_key_icons(self, icons):
+        """icons: dict mapping uppercase key labels (e.g. 'Q') to QPixmap."""
+        self.key_icons = dict(icons or {})
+        self.update()
 
     def set_steps(self, steps):
         self.steps = list(steps)
@@ -223,20 +242,51 @@ class TimelineStrip(QWidget):
             is_current = (i == self.current_step)
             is_past = (self.playhead_ms > s['t_ms']) and not is_current
 
-            if is_current:
-                fill, border, text_color = COLOR_STEP_CURRENT_FILL, COLOR_STEP_CURRENT_BORDER, COLOR_STEP_CURRENT_TEXT
-            elif is_past:
-                fill, border, text_color = COLOR_STEP_PAST_FILL, COLOR_STEP_PAST_BORDER, COLOR_STEP_PAST_TEXT
-            else:
-                fill, border, text_color = COLOR_STEP_UPCOMING_FILL, COLOR_STEP_UPCOMING_BORDER, COLOR_STEP_UPCOMING_TEXT
-
-            painter.setBrush(fill)
-            painter.setPen(QPen(border, 1.5))
-            painter.drawRoundedRect(box, 5, 5)
-
-            painter.setPen(QPen(text_color))
             label = _format_input(s['input'])
-            painter.drawText(box, Qt.AlignmentFlag.AlignCenter, label[:4])
+            # priority: per-event icon > per-key mapping > none
+            icon = s.get('icon_pixmap') or self.key_icons.get(label.upper())
+
+            if icon is not None and not icon.isNull():
+                # icon mode — render the spell sprite, dim past, glow current
+                painter.save()
+                if is_past:
+                    painter.setOpacity(0.35)
+                elif not is_current:
+                    painter.setOpacity(0.85)
+                pad = 3
+                w = int(self.BOX_WIDTH - pad * 2)
+                h = int(self.BOX_HEIGHT - pad * 2)
+                scaled = icon.scaled(
+                    w, h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                tx = box.x() + (self.BOX_WIDTH - scaled.width()) / 2
+                ty = y + (self.BOX_HEIGHT - scaled.height()) / 2
+                painter.drawPixmap(int(tx), int(ty), scaled)
+                painter.restore()
+                # state border (drawn at full opacity over the icon)
+                if is_current:
+                    painter.setPen(QPen(COLOR_STEP_CURRENT_BORDER, 2))
+                    painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                    painter.drawRoundedRect(box, 5, 5)
+                elif is_past:
+                    painter.setPen(QPen(COLOR_STEP_PAST_BORDER, 1))
+                    painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                    painter.drawRoundedRect(box, 5, 5)
+            else:
+                # text fallback (no icon for this key)
+                if is_current:
+                    fill, border, text_color = COLOR_STEP_CURRENT_FILL, COLOR_STEP_CURRENT_BORDER, COLOR_STEP_CURRENT_TEXT
+                elif is_past:
+                    fill, border, text_color = COLOR_STEP_PAST_FILL, COLOR_STEP_PAST_BORDER, COLOR_STEP_PAST_TEXT
+                else:
+                    fill, border, text_color = COLOR_STEP_UPCOMING_FILL, COLOR_STEP_UPCOMING_BORDER, COLOR_STEP_UPCOMING_TEXT
+                painter.setBrush(fill)
+                painter.setPen(QPen(border, 1.5))
+                painter.drawRoundedRect(box, 5, 5)
+                painter.setPen(QPen(text_color))
+                painter.drawText(box, Qt.AlignmentFlag.AlignCenter, label[:4])
 
         # --- user input markers (under axis) ---
         painter.setFont(QFont('Consolas', 9))
@@ -263,7 +313,7 @@ class TimelineStrip(QWidget):
 # ============================================================
 
 class PlayerWindow(QWidget):
-    def __init__(self, events, title='HowTo', media_player=None):
+    def __init__(self, events, title='HowTo', media_player=None, key_icons=None):
         super().__init__()
         self.setWindowTitle(title)
         self.setWindowFlags(
@@ -279,6 +329,7 @@ class PlayerWindow(QWidget):
         self._start_time = None
         self._playing = False
         self._drag_pos = None
+        self.setMouseTracking(True)
 
         self._media_player = media_player
 
@@ -302,6 +353,8 @@ class PlayerWindow(QWidget):
 
         self.timeline_strip.set_steps(self.steps)
         self.timeline_strip.set_playhead(0)
+        # Always pass through; empty dict → text fallback per-step in paintEvent.
+        self.timeline_strip.set_key_icons(key_icons or {})
 
     # ------------------------------------------------------------------
     # UI
@@ -471,6 +524,8 @@ class PlayerWindow(QWidget):
     # ------------------------------------------------------------------
 
     def mousePressEvent(self, e):
+        if handle_resize_press(self, e):
+            return
         if e.button() == Qt.MouseButton.LeftButton:
             child = self.childAt(e.position().toPoint())
             if child is self.timeline_strip:
@@ -483,6 +538,8 @@ class PlayerWindow(QWidget):
         if e.buttons() & Qt.MouseButton.LeftButton and self._drag_pos is not None:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
             e.accept()
+            return
+        handle_resize_move(self, e)
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None

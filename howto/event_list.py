@@ -14,7 +14,7 @@ class EventListView(QTableWidget):
 
     selection_changed = pyqtSignal(list)  # emits list of selected event indices
 
-    HEADERS = ['#', '시간 (ms)', '종류', '키 / 버튼', '동작']
+    HEADERS = ['#', '시간 (ms)', '종류', '키 / 버튼', '동작', '🖼']
 
     def __init__(self):
         super().__init__()
@@ -33,6 +33,7 @@ class EventListView(QTableWidget):
         self.setColumnWidth(1, 90)
         self.setColumnWidth(2, 110)
         self.setColumnWidth(3, 140)
+        self.setColumnWidth(4, 120)
 
         self.itemSelectionChanged.connect(self._on_selection_changed)
 
@@ -51,12 +52,15 @@ class EventListView(QTableWidget):
             e.get('type', ''),
             self._key_label(e),
             self._action_label(e),
+            '✓' if e.get('icon') else '',
         ]
         for col, text in enumerate(cells):
             item = QTableWidgetItem(text)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            if col == 0 or col == 1:
+            if col in (0, 1):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            elif col == 5:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.setItem(i, col, item)
 
     @staticmethod

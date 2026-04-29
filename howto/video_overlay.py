@@ -15,6 +15,8 @@ from PyQt6.QtWidgets import (
     QFrame,
 )
 
+from .frameless import handle_resize_press, handle_resize_move
+
 
 class VideoOverlayWindow(QWidget):
     def __init__(self, video_path, title='Video'):
@@ -28,6 +30,7 @@ class VideoOverlayWindow(QWidget):
         )
 
         self._drag_pos = None
+        self.setMouseTracking(True)
         self._build_ui(title)
 
         self.player = QMediaPlayer()
@@ -98,6 +101,9 @@ class VideoOverlayWindow(QWidget):
     # ------------------------------------------------------------------
 
     def mousePressEvent(self, e):
+        # let edges trigger an OS-managed resize first
+        if handle_resize_press(self, e):
+            return
         if e.button() == Qt.MouseButton.LeftButton:
             # only drag when click lands on the title row, not on the video
             child = self.childAt(e.position().toPoint())
@@ -111,6 +117,9 @@ class VideoOverlayWindow(QWidget):
         if e.buttons() & Qt.MouseButton.LeftButton and self._drag_pos is not None:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
             e.accept()
+            return
+        # update cursor when hovering near edges
+        handle_resize_move(self, e)
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
