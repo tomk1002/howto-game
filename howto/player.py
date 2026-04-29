@@ -33,6 +33,7 @@ from pynput import keyboard, mouse
 
 from .frameless import handle_resize_press, handle_resize_move
 from .resources_loader import path_to_absolute
+from . import sounds
 
 
 # Empirical compensation for ffmpeg gdigrab startup latency. The input
@@ -132,6 +133,10 @@ MAX_MATCH_WINDOW_MS = SCORE_BANDS[-1][0]
 
 # Pre-roll countdown for the "play once" button.
 PLAY_ONCE_DELAY_MS = 5000
+
+# Playback rates available via the speed-cycle button.
+SPEED_STEPS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
+DEFAULT_SPEED_IDX = 3  # 1.0x
 
 
 class TimelineStrip(QWidget):
@@ -444,6 +449,7 @@ class PlayerWindow(QWidget):
     # event loop, so QTimer.singleShot from there never delivers. Emitting
     # a Qt signal auto-queues to the receiver's (main) thread instead.
     user_input_received = pyqtSignal(str)
+    play_once_requested = pyqtSignal()
 
     def __init__(self, events, title='HowTo', media_player=None, key_icons=None):
         super().__init__()
@@ -466,6 +472,7 @@ class PlayerWindow(QWidget):
         self._play_once_active = False
         self._countdown_remaining = 0
         self._score_summary_active = False
+        self._speed_idx = DEFAULT_SPEED_IDX
         self.setMouseTracking(True)
 
         self._media_player = media_player
@@ -484,6 +491,7 @@ class PlayerWindow(QWidget):
             self._media_player.playbackStateChanged.connect(self._on_external_state)
 
         self.user_input_received.connect(self._record_user_input)
+        self.play_once_requested.connect(self._start_play_once)
         self._kb_listener = keyboard.Listener(on_press=self._on_user_key)
         self._mouse_listener = mouse.Listener(on_click=self._on_user_click)
         self._kb_listener.start()
@@ -498,6 +506,7 @@ class PlayerWindow(QWidget):
         # Always pass through; empty dict → text fallback per-step in paintEvent.
         self.timeline_strip.set_key_icons(key_icons or {})
         self._update_score_label()
+        self._apply_speed()
 
     # ------------------------------------------------------------------
     # UI
@@ -551,7 +560,7 @@ class PlayerWindow(QWidget):
         header.addWidget(self.btn_play)
         self.btn_play_once = QPushButton('5초▶')
         self.btn_play_once.setFixedSize(40, 22)
-        self.btn_play_once.setToolTip('5초 후 한 번만 재생')
+        self.btn_play_once.setToolTip('5초 후 한 번만 재생 (F8)')
         self.btn_play_once.clicked.connect(self._start_play_once)
         header.addWidget(self.btn_play_once)
         self.btn_reset = QPushButton('⟲')
@@ -559,6 +568,11 @@ class PlayerWindow(QWidget):
         self.btn_reset.setToolTip('처음으로')
         self.btn_reset.clicked.connect(self._reset)
         header.addWidget(self.btn_reset)
+        self.btn_speed = QPushButton(self._speed_label())
+        self.btn_speed.setFixedSize(44, 22)
+        self.btn_speed.setToolTip('재생 속도 (클릭하면 다음 단계로 순환)')
+        self.btn_speed.clicked.connect(self._cycle_speed)
+        header.addWidget(self.btn_speed)
         self.btn_zoom_out = QPushButton('−')
         self.btn_zoom_out.setFixedSize(22, 22)
         self.btn_zoom_out.setToolTip('아이콘 작게')
@@ -591,6 +605,19 @@ class PlayerWindow(QWidget):
     # Playback control
     # ------------------------------------------------------------------
 
+    def _speed_label(self):
+        return f'{SPEED_STEPS[self._speed_idx]:g}×'
+
+    def _apply_speed(self):
+        rate = SPEED_STEPS[self._speed_idx]
+        self.btn_speed.setText(self._speed_label())
+        if self._media_player is not None:
+            self._media_player.setPlaybackRate(rate)
+
+    def _cycle_speed(self):
+        self._speed_idx = (self._speed_idx + 1) % len(SPEED_STEPS)
+        self._apply_speed()
+
     def _start_play_once(self):
         if self._media_player is None:
             return
@@ -603,16 +630,22 @@ class PlayerWindow(QWidget):
         self._reset_score()
         self._countdown_remaining = PLAY_ONCE_DELAY_MS // 1000
         self.lbl_big_countdown.setText(str(self._countdown_remaining))
+        self.lbl_big_countdown.setStyleSheet(
+            'color: #ffd33d; font-weight: 900; font-size: 140px;'
+        )
         self._body_stack.setCurrentIndex(1)
+        sounds.play('tick')
         self._countdown_timer.start()
 
     def _on_countdown_tick(self):
         self._countdown_remaining -= 1
         if self._countdown_remaining > 0:
             self.lbl_big_countdown.setText(str(self._countdown_remaining))
+            sounds.play('tick')
             return
         self._countdown_timer.stop()
         self.lbl_big_countdown.setText('시작!')
+        sounds.play('go')
         QTimer.singleShot(450, self._countdown_done)
 
     def _countdown_done(self):
@@ -624,7 +657,12 @@ class PlayerWindow(QWidget):
 
     def _show_score_summary(self):
         self._score_summary_active = True
-        self.lbl_big_countdown.setText(f'{self._score_percent()}/100')
+        p = self._score_percent()
+        c = self._color_for_percent(p)
+        self.lbl_big_countdown.setText(f'{p}/100')
+        self.lbl_big_countdown.setStyleSheet(
+            f'color: {c}; font-weight: 900; font-size: 140px;'
+        )
         self._body_stack.setCurrentIndex(1)
         QTimer.singleShot(3000, self._dismiss_score_summary)
 
@@ -743,7 +781,11 @@ class PlayerWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _on_user_key(self, key):
-        self.user_input_received.emit(_strip_prefix(_key_label(key)))
+        label = _strip_prefix(_key_label(key))
+        if label.lower() == 'f8':
+            self.play_once_requested.emit()
+            return
+        self.user_input_received.emit(label)
 
     def _on_user_click(self, _x, _y, button, pressed):
         if not pressed:
@@ -798,8 +840,20 @@ class PlayerWindow(QWidget):
         m = self._max_score()
         return int(round(self._score * 100 / m)) if m > 0 else 0
 
+    @staticmethod
+    def _color_for_percent(p):
+        if p >= 100: return '#ffd33d'   # gold
+        if p >=  80: return '#7ee787'   # green
+        if p >=  50: return '#ffa657'   # orange
+        return '#ff7b72'                # red
+
     def _update_score_label(self):
-        self.lbl_score.setText(f'{self._score_percent()}/100')
+        p = self._score_percent()
+        self.lbl_score.setText(f'{p}/100')
+        c = self._color_for_percent(p)
+        self.lbl_score.setStyleSheet(
+            f'color: {c}; font-weight: 700; font-size: 22px;'
+        )
 
     def _reset_score(self):
         self._matched_steps.clear()

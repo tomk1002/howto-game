@@ -29,7 +29,7 @@ from .recorder import Recorder, HotkeyToggle
 from .storage import save as save_combo, load as load_combo
 from .timeline import TimelineWidget
 from .windows import list_visible_windows, get_window_bounds
-from .screen_recorder import ScreenRecorder, is_ffmpeg_available, apply_crop
+from .screen_recorder import ScreenRecorder, is_ffmpeg_available
 from .event_list import EventListView
 from .player import PlayerWindow
 from .video_overlay import VideoOverlayWindow
@@ -783,7 +783,9 @@ class MainWindow(QMainWindow):
         # If a video is loaded, open the video overlay first and link its
         # QMediaPlayer to the sequence overlay so they share a time source.
         if self._video_path and os.path.exists(self._video_path):
-            self._video_overlay_window = VideoOverlayWindow(self._video_path, title=title)
+            self._video_overlay_window = VideoOverlayWindow(
+                self._video_path, title=title, crop_rect=self._crop_rect,
+            )
             self._video_overlay_window.show()
             media_player = self._video_overlay_window.player
 
@@ -850,19 +852,10 @@ class MainWindow(QMainWindow):
         if source_video and os.path.exists(source_video):
             try:
                 src = Path(source_video).resolve()
-
-                if self._crop_rect is not None:
-                    # ffmpeg re-encode with crop filter; produces target_video directly.
-                    cx, cy, cw, ch = self._crop_rect
-                    self.statusBar().showMessage(f'크롭 인코딩 중 ({cw}×{ch})…')
-                    apply_crop(str(src), str(target_video), cx, cy, cw, ch)
-                    if is_fresh:
-                        # remove the uncropped temp recording
-                        try:
-                            os.remove(src)
-                        except OSError:
-                            pass
-                elif src != target_video.resolve():
+                # Save the original video as-is. The crop region is stored in
+                # JSON and applied at playback time — no ffmpeg re-encoding,
+                # so the user can adjust the crop later without quality loss.
+                if src != target_video.resolve():
                     if is_fresh:
                         shutil.move(str(src), str(target_video))
                     else:
@@ -878,11 +871,11 @@ class MainWindow(QMainWindow):
                             'capture_bounds': list(self._capture_bounds or ()),
                         }
                     else:
-                        video_meta = dict(self._loaded_video_meta) if self._loaded_video_meta else None
-                        if video_meta is None:
-                            video_meta = {}
+                        video_meta = dict(self._loaded_video_meta) if self._loaded_video_meta else {}
                     if self._crop_rect is not None:
-                        video_meta['crop_applied'] = list(self._crop_rect)
+                        video_meta['crop_view'] = list(self._crop_rect)
+                    elif 'crop_view' in video_meta:
+                        del video_meta['crop_view']
                     if is_fresh:
                         self._completed_video_path = None
             except (OSError, RuntimeError) as exc:
@@ -975,8 +968,12 @@ class MainWindow(QMainWindow):
             if video_path.exists():
                 self._load_video(str(video_path))
                 self._loaded_video_meta = data.get('video_meta')
-        # reset transient crop state on load
+        # restore crop region from metadata if present
         self._crop_rect = None
+        meta = self._loaded_video_meta or {}
+        cv = meta.get('crop_view')
+        if cv and len(cv) == 4:
+            self._crop_rect = tuple(int(v) for v in cv)
         self._refresh_crop_label()
 
         msg = (
