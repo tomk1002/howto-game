@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QFrame,
     QSizePolicy,
+    QStackedWidget,
 )
 from pynput import keyboard, mouse
 
@@ -112,7 +113,25 @@ COLOR_USER_FILL = QColor('#142944')
 COLOR_USER_BORDER = QColor('#3984c6')
 COLOR_USER_TEXT = QColor('#cce6ff')
 
+# match-quality border colors — applied to user-input boxes after scoring
+QUALITY_BORDER = {
+    'perfect': QColor('#ffd33d'),   # gold
+    'good':    QColor('#7ee787'),   # green
+    'ok':      QColor('#79c0ff'),   # blue
+    'miss':    QColor('#ff7b72'),   # red
+}
+
 COLOR_PLAYHEAD = QColor('#ff7b72')
+
+# Scoring windows (ms) and points per match quality.
+SCORE_BANDS = (
+    (500,  'good', 100),
+    (1000, 'ok',    50),
+)
+MAX_MATCH_WINDOW_MS = SCORE_BANDS[-1][0]
+
+# Pre-roll countdown for the "play once" button.
+PLAY_ONCE_DELAY_MS = 5000
 
 
 class TimelineStrip(QWidget):
@@ -215,9 +234,9 @@ class TimelineStrip(QWidget):
         self.current_step = cur
         self.update()
 
-    def add_user_input(self, t_ms, label):
+    def add_user_input(self, t_ms, label, quality=None):
         t = int(max(0, t_ms))
-        self.user_inputs.append({'t_ms': t, 'label': label})
+        self.user_inputs.append({'t_ms': t, 'label': label, 'quality': quality})
         # cap memory
         if len(self.user_inputs) > 200:
             self.user_inputs = self.user_inputs[-200:]
@@ -380,6 +399,7 @@ class TimelineStrip(QWidget):
             label = _format_input(evt['label'])
             text = label[:4]
             icon = self.key_icons.get(label.upper())
+            border_color = QUALITY_BORDER.get(evt.get('quality'), COLOR_USER_BORDER)
 
             if icon is not None and not icon.isNull():
                 painter.save()
@@ -397,13 +417,13 @@ class TimelineStrip(QWidget):
                 painter.drawPixmap(int(tx), int(ty), scaled)
                 painter.restore()
                 self._draw_label_on_icon(painter, box, text, text_font, False)
-                painter.setPen(QPen(COLOR_USER_BORDER, 2))
+                painter.setPen(QPen(border_color, 2))
                 painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
                 painter.drawRoundedRect(box, 5, 5)
                 painter.setFont(text_font)
             else:
                 painter.setBrush(COLOR_USER_FILL)
-                painter.setPen(QPen(COLOR_USER_BORDER, 1.5))
+                painter.setPen(QPen(border_color, 1.5))
                 painter.drawRoundedRect(box, 5, 5)
                 painter.setPen(QPen(COLOR_USER_TEXT))
                 painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
@@ -441,6 +461,11 @@ class PlayerWindow(QWidget):
         self._start_time = None
         self._playing = False
         self._drag_pos = None
+        self._matched_steps = set()
+        self._score = 0
+        self._play_once_active = False
+        self._countdown_remaining = 0
+        self._score_summary_active = False
         self.setMouseTracking(True)
 
         self._media_player = media_player
@@ -450,10 +475,13 @@ class PlayerWindow(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
 
+        self._countdown_timer = QTimer(self)
+        self._countdown_timer.setInterval(1000)
+        self._countdown_timer.timeout.connect(self._on_countdown_tick)
+
         if self._media_player is not None:
             self._media_player.positionChanged.connect(self._on_external_position)
             self._media_player.playbackStateChanged.connect(self._on_external_state)
-            self._media_player.durationChanged.connect(self._on_external_duration)
 
         self.user_input_received.connect(self._record_user_input)
         self._kb_listener = keyboard.Listener(on_press=self._on_user_key)
@@ -469,6 +497,7 @@ class PlayerWindow(QWidget):
         self.timeline_strip.set_playhead(0)
         # Always pass through; empty dict → text fallback per-step in paintEvent.
         self.timeline_strip.set_key_icons(key_icons or {})
+        self._update_score_label()
 
     # ------------------------------------------------------------------
     # UI
@@ -511,14 +540,20 @@ class PlayerWindow(QWidget):
         self.lbl_title = QLabel(title)
         self.lbl_title.setStyleSheet('color: #7ee787; font-weight: 600; font-size: 12px;')
         header.addWidget(self.lbl_title, 1)
-        self.lbl_input_count = QLabel('입력 0')
-        self.lbl_input_count.setStyleSheet('color: #79c0ff; font-size: 11px;')
-        self.lbl_input_count.setToolTip('pynput가 캡처한 키/마우스 입력 누적 수')
-        header.addWidget(self.lbl_input_count)
+        self.lbl_score = QLabel('0/100')
+        self.lbl_score.setStyleSheet('color: #ffd33d; font-weight: 700; font-size: 22px;')
+        self.lbl_score.setToolTip('점수 (0~100)')
+        header.addWidget(self.lbl_score)
         self.btn_play = QPushButton('▶')
         self.btn_play.setFixedSize(28, 22)
+        self.btn_play.setToolTip('재생/일시정지 (계속 반복)')
         self.btn_play.clicked.connect(self._toggle_play)
         header.addWidget(self.btn_play)
+        self.btn_play_once = QPushButton('5초▶')
+        self.btn_play_once.setFixedSize(40, 22)
+        self.btn_play_once.setToolTip('5초 후 한 번만 재생')
+        self.btn_play_once.clicked.connect(self._start_play_once)
+        header.addWidget(self.btn_play_once)
         self.btn_reset = QPushButton('⟲')
         self.btn_reset.setFixedSize(28, 22)
         self.btn_reset.setToolTip('처음으로')
@@ -540,15 +575,64 @@ class PlayerWindow(QWidget):
         header.addWidget(self.btn_close)
         inner.addLayout(header)
 
-        # timeline strip — replaces both the old vertical step list and
-        # the recent-inputs label. Steps and live user marks share one
-        # left→right time axis.
+        # body: timeline strip swaps with a huge countdown label during pre-roll.
         self.timeline_strip = TimelineStrip()
-        inner.addWidget(self.timeline_strip, 1)
+        self.lbl_big_countdown = QLabel('')
+        self.lbl_big_countdown.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_big_countdown.setStyleSheet(
+            'color: #ffd33d; font-weight: 900; font-size: 140px;'
+        )
+        self._body_stack = QStackedWidget()
+        self._body_stack.addWidget(self.timeline_strip)   # idx 0
+        self._body_stack.addWidget(self.lbl_big_countdown)  # idx 1
+        inner.addWidget(self._body_stack, 1)
 
     # ------------------------------------------------------------------
     # Playback control
     # ------------------------------------------------------------------
+
+    def _start_play_once(self):
+        if self._media_player is None:
+            return
+        # cancel any in-flight countdown / score summary
+        self._countdown_timer.stop()
+        self._score_summary_active = False
+        self._media_player.pause()
+        self._media_player.setPosition(0)
+        self.timeline_strip.clear_user_inputs()
+        self._reset_score()
+        self._countdown_remaining = PLAY_ONCE_DELAY_MS // 1000
+        self.lbl_big_countdown.setText(str(self._countdown_remaining))
+        self._body_stack.setCurrentIndex(1)
+        self._countdown_timer.start()
+
+    def _on_countdown_tick(self):
+        self._countdown_remaining -= 1
+        if self._countdown_remaining > 0:
+            self.lbl_big_countdown.setText(str(self._countdown_remaining))
+            return
+        self._countdown_timer.stop()
+        self.lbl_big_countdown.setText('시작!')
+        QTimer.singleShot(450, self._countdown_done)
+
+    def _countdown_done(self):
+        self._body_stack.setCurrentIndex(0)
+        if self._media_player is None:
+            return
+        self._play_once_active = True
+        self._media_player.play()
+
+    def _show_score_summary(self):
+        self._score_summary_active = True
+        self.lbl_big_countdown.setText(f'{self._score_percent()}/100')
+        self._body_stack.setCurrentIndex(1)
+        QTimer.singleShot(3000, self._dismiss_score_summary)
+
+    def _dismiss_score_summary(self):
+        if not self._score_summary_active:
+            return
+        self._score_summary_active = False
+        self._body_stack.setCurrentIndex(0)
 
     def _zoom(self, delta):
         if not self.timeline_strip.adjust_scale(delta):
@@ -593,6 +677,10 @@ class PlayerWindow(QWidget):
         self._timer.stop()
 
     def _reset(self):
+        self._countdown_timer.stop()
+        self._score_summary_active = False
+        self._body_stack.setCurrentIndex(0)
+        self._play_once_active = False
         if self._media_player is not None:
             self._media_player.pause()
             self._media_player.setPosition(0)
@@ -602,6 +690,7 @@ class PlayerWindow(QWidget):
         self.current_step = -1
         self.timeline_strip.set_playhead(0)
         self.timeline_strip.clear_user_inputs()
+        self._reset_score()
 
     def _tick(self):
         if not self._playing or self._start_time is None:
@@ -618,15 +707,21 @@ class PlayerWindow(QWidget):
     # External (video) time source
     def _on_external_position(self, ms):
         new_t = int(ms) + SYNC_OFFSET_MS
-        # When the video loops, position drops sharply backward — clear user
-        # marks from the previous run so the new loop starts clean.
-        if new_t + 100 < self.timeline_strip.playhead_ms:
+        looped = new_t + 100 < self.timeline_strip.playhead_ms
+        if looped:
+            if self._play_once_active:
+                # one-shot finished — pause immediately, keep score & marks
+                self._play_once_active = False
+                self._media_player.pause()
+                dur = self._media_player.duration()
+                if dur > 0:
+                    # snap back to the end frame so we don't show frame-0
+                    self._media_player.setPosition(max(0, dur - 80))
+                self._show_score_summary()
+                return
             self.timeline_strip.clear_user_inputs()
+            self._reset_score()
         self.timeline_strip.set_playhead(new_t)
-
-    def _on_external_duration(self, ms):
-        if ms and ms > 0:
-            self.timeline_strip.ensure_duration(int(ms) + SYNC_OFFSET_MS)
 
     def _on_external_state(self, state):
         if state == QMediaPlayer.PlaybackState.PlayingState:
@@ -656,8 +751,60 @@ class PlayerWindow(QWidget):
         self.user_input_received.emit(_strip_prefix(str(button)))
 
     def _record_user_input(self, label):
-        self.timeline_strip.add_user_input(self._current_time_ms(), label)
-        self.lbl_input_count.setText(f'입력 {len(self.timeline_strip.user_inputs)}')
+        # Ignore presses while paused / idle / pre-roll countdown — only the
+        # actual playback window counts toward the run.
+        if self._media_player is not None:
+            playing = self._media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        else:
+            playing = self._playing
+        if not playing:
+            return
+        t_ms = self._current_time_ms()
+        quality, points, matched_idx = self._match_to_step(t_ms, label)
+        if matched_idx is not None:
+            self._matched_steps.add(matched_idx)
+            self._score += points
+        self.timeline_strip.add_user_input(t_ms, label, quality)
+        self._update_score_label()
+
+    def _match_to_step(self, t_ms, label):
+        """Greedy nearest-unmatched step within the largest scoring window.
+        Returns (quality, points, step_index) or ('miss', 0, None)."""
+        target = label.upper()
+        best_dt = None
+        best_idx = None
+        for i, s in enumerate(self.steps):
+            if i in self._matched_steps:
+                continue
+            if _format_input(s['input']).upper() != target:
+                continue
+            dt = abs(t_ms - s['t_ms'])
+            if dt > MAX_MATCH_WINDOW_MS:
+                continue
+            if best_dt is None or dt < best_dt:
+                best_dt = dt
+                best_idx = i
+        if best_idx is None:
+            return 'miss', 0, None
+        for limit, quality, points in SCORE_BANDS:
+            if best_dt <= limit:
+                return quality, points, best_idx
+        return 'miss', 0, None  # unreachable — MAX_MATCH_WINDOW_MS == last band
+
+    def _max_score(self):
+        return len(self.steps) * SCORE_BANDS[0][2]
+
+    def _score_percent(self):
+        m = self._max_score()
+        return int(round(self._score * 100 / m)) if m > 0 else 0
+
+    def _update_score_label(self):
+        self.lbl_score.setText(f'{self._score_percent()}/100')
+
+    def _reset_score(self):
+        self._matched_steps.clear()
+        self._score = 0
+        self._update_score_label()
 
     # ------------------------------------------------------------------
     # Frameless window dragging (only via header area, not the strip)
