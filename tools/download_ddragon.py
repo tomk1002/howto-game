@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -22,6 +23,18 @@ ROOT = Path(__file__).resolve().parent.parent
 RES = ROOT / 'resources'
 
 VERSIONS_URL = 'https://ddragon.leagueoflegends.com/api/versions.json'
+
+# CommunityDragon mirrors the in-game asset bundle, which includes recast /
+# stance-change icons that DDragon's spells[] never exposes (LeeSinQ2, RivenR2,
+# etc). We discover them per-champion by scanning the character bin.json.
+CDRAGON_BASE = 'https://raw.communitydragon.org/latest'
+CDRAGON_HEADERS = {'User-Agent': 'Mozilla/5.0'}
+_ICON_REF_RE = re.compile(
+    r'"ASSETS/Characters/[^/"]+/HUD/Icons2D/([A-Za-z][A-Za-z0-9_]*)\.dds"',
+    re.IGNORECASE,
+)
+_ORDINAL_WORD_TO_DIGIT = {'one': '1', 'two': '2', 'three': '3', 'four': '4'}
+_ORDINAL_TAIL_RE = re.compile(r'(One|Two|Three|Four)$', re.IGNORECASE)
 
 
 def fetch_json(url, retries=3):
@@ -54,6 +67,71 @@ def download(url, dst, retries=3):
                 print(f'  ! failed: {url}: {exc}', file=sys.stderr)
                 return False
             time.sleep(1 + i)
+
+
+def try_download_silent(url, dst, headers=None):
+    """Single-attempt download for assets that may not exist.
+    Returns True if file exists locally after the attempt."""
+    dst = Path(dst)
+    if dst.exists() and dst.stat().st_size > 0:
+        return True
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = r.read()
+    except Exception:
+        return False
+    tmp = dst.with_suffix(dst.suffix + '.part')
+    tmp.write_bytes(data)
+    tmp.replace(dst)
+    return True
+
+
+def _normalize_spell_stem(stem):
+    """Canonicalize trailing ordinal so 'LeeSinQOne' and 'LeeSinQ1' compare equal,
+    but 'LeeSinQ2' stays distinct."""
+    m = _ORDINAL_TAIL_RE.search(stem)
+    if m:
+        stem = stem[: m.start()] + _ORDINAL_WORD_TO_DIGIT[m.group(1).lower()]
+    return stem.lower()
+
+
+def cdragon_extra_spell_icons(champ_id, primary_stems):
+    """Discover non-primary spell icons on CommunityDragon for a champion.
+
+    Returns list of (icon_id, png_url, slot_letter). slot_letter is Q/W/E/R
+    when derivable from the icon id, otherwise None. ``primary_stems`` is the
+    set of normalized stems already covered by DDragon (skip them).
+    """
+    champ_lower = champ_id.lower()
+    bin_url = f'{CDRAGON_BASE}/game/data/characters/{champ_lower}/{champ_lower}.bin.json'
+    req = urllib.request.Request(bin_url, headers=CDRAGON_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            text = r.read().decode('utf-8', errors='replace')
+    except Exception:
+        return []
+
+    seen = set()
+    out = []
+    for m in _ICON_REF_RE.finditer(text):
+        icon_id = m.group(1)
+        key = icon_id.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if _normalize_spell_stem(icon_id) in primary_stems:
+            continue
+        # slot letter: first char after champion id, if it is Q/W/E/R
+        slot = None
+        if key.startswith(champ_lower) and len(key) > len(champ_lower):
+            c = key[len(champ_lower)].upper()
+            if c in ('Q', 'W', 'E', 'R'):
+                slot = c
+        png_url = f'{CDRAGON_BASE}/game/assets/characters/{champ_lower}/hud/icons2d/{key}.png'
+        out.append((icon_id, png_url, slot))
+    return out
 
 
 def main():
@@ -103,6 +181,7 @@ def main():
         detail = fetch_json(f'{base}/data/{args.locale}/champion/{champ_id}.json')['data'][champ_id]
 
         spells_meta = []
+        primary_stems = set()
         for slot, spell in zip(['Q', 'W', 'E', 'R'], detail['spells']):
             fname = spell['image']['full']
             url = f'{base}/img/spell/{fname}'
@@ -110,11 +189,28 @@ def main():
             total_files += 1
             if download(url, dst):
                 new_files += 1
+            primary_stems.add(_normalize_spell_stem(Path(fname).stem))
             spells_meta.append({
                 'key': slot,
                 'name': spell['name'],
                 'icon': str(dst.relative_to(RES)).replace('\\', '/'),
             })
+
+        # recast / stance-change icons via CommunityDragon (LeeSinQ2 etc.)
+        for icon_id, alt_url, slot in cdragon_extra_spell_icons(champ_id, primary_stems):
+            if slot is None:
+                continue  # passive variants etc — no slot to attach
+            alt_dst = RES / 'champion' / 'spells' / f'{icon_id}.png'
+            already = alt_dst.exists() and alt_dst.stat().st_size > 0
+            total_files += 1
+            if not try_download_silent(alt_url, alt_dst, headers=CDRAGON_HEADERS):
+                continue
+            if not already:
+                new_files += 1
+            rel = str(alt_dst.relative_to(RES)).replace('\\', '/')
+            target = next((e for e in spells_meta if e['key'] == slot), None)
+            if target is not None:
+                target.setdefault('alts', []).append({'icon': rel})
 
         passive_fname = detail['passive']['image']['full']
         url = f'{base}/img/passive/{passive_fname}'
