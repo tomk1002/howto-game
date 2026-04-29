@@ -8,7 +8,7 @@ loaded from JSON is fed directly to ``fitInView``.
 """
 
 import os
-from PyQt6.QtCore import Qt, QPointF, QRectF, QSizeF, QTimer, QUrl
+from PyQt6.QtCore import Qt, QPointF, QRectF, QSize, QSizeF, QPoint, QSettings, QTimer, QUrl
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PyQt6.QtMultimediaWidgets import QGraphicsVideoItem
@@ -61,6 +61,16 @@ class VideoOverlayWindow(QWidget):
 
         self.resize(560, 340)
         self.move(440, 60)
+        # Restore previous size/pos. If found, skip the auto-fit-to-aspect on
+        # first frame so the user's chosen window size is preserved.
+        s = QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
+        sz = s.value('size')
+        if isinstance(sz, QSize) and sz.isValid():
+            self.resize(sz)
+            self._auto_fit_done = True
+        pos = s.value('pos')
+        if isinstance(pos, QPoint):
+            self.move(pos)
 
     def _build_ui(self, title):
         outer = QVBoxLayout(self)
@@ -195,7 +205,16 @@ class VideoOverlayWindow(QWidget):
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
 
+    _SETTINGS_ORG = 'HowTo'
+    _SETTINGS_APP = 'OverlayVideo'
+
+    def _save_prefs(self):
+        s = QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
+        s.setValue('size', self.size())
+        s.setValue('pos', self.pos())
+
     def closeEvent(self, e):
+        self._save_prefs()
         try:
             self.player.stop()
             self.player.setSource(QUrl())

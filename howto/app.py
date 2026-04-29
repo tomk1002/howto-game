@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QFrame,
     QSlider,
+    QDialog,
 )
 
 from .recorder import Recorder, HotkeyToggle
@@ -34,6 +35,7 @@ from .event_list import EventListView
 from .player import PlayerWindow
 from .video_overlay import VideoOverlayWindow
 from .crop_dialog import CropDialog
+from .add_event_dialog import AddEventDialog
 from .resources_loader import (
     champion_choices,
     champion_skill_icons,
@@ -246,13 +248,19 @@ class MainWindow(QMainWindow):
         self.btn_event_icon_clear = QPushButton('아이콘 제거')
         self.btn_event_icon_clear.setToolTip('선택 이벤트의 개별 아이콘 제거 (키 매핑·자동 매핑으로 복귀)')
         self.btn_event_icon_clear.clicked.connect(self._clear_event_icon)
+        self.btn_add_event = QPushButton('➕ 이벤트 추가')
+        self.btn_add_event.setToolTip(
+            '원하는 시간/키로 이벤트를 직접 추가 (현재 영상 위치가 기본값)'
+        )
+        self.btn_add_event.clicked.connect(self._add_event)
         self.btn_undo = QPushButton('↶ 실행취소')
         self.btn_undo.setToolTip('마지막 편집 되돌리기 (Ctrl+Z)')
         self.btn_undo.clicked.connect(self._undo)
         for b in (
             self.btn_del, self.btn_trim_start, self.btn_trim_end, self.btn_keep_range,
             self.btn_remove_releases, self.btn_remove_same_key,
-            self.btn_event_icon, self.btn_event_icon_clear, self.btn_undo,
+            self.btn_event_icon, self.btn_event_icon_clear,
+            self.btn_add_event, self.btn_undo,
         ):
             edit_bar.addWidget(b)
         edit_bar.addStretch(1)
@@ -509,6 +517,8 @@ class MainWindow(QMainWindow):
         self.btn_event_icon.setEnabled(any_press_selected and not recording)
         any_has_icon = any(self.recorder.events[i].get('icon') for i in indices)
         self.btn_event_icon_clear.setEnabled(any_has_icon and not recording)
+        # ▼ insert is always available outside of recording
+        self.btn_add_event.setEnabled(not recording)
         # bulk release removal — always available when there are events
         self.btn_remove_releases.setEnabled(bool(self.recorder.events) and not recording)
         self.btn_undo.setEnabled(bool(self._history) and not recording)
@@ -523,6 +533,24 @@ class MainWindow(QMainWindow):
         self._refresh_edit_button_state([])
         if msg:
             self.statusBar().showMessage(msg)
+
+    def _add_event(self):
+        if self.recorder.recording:
+            return
+        # default to current video position so the user can pause and add
+        default_t = int(self.player.position()) if self._video_path else 0
+        if not default_t and self.recorder.events:
+            default_t = self.recorder.events[-1].get('t_ms', 0) + 100
+        dlg = AddEventDialog(self, default_t_ms=default_t)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_event = dlg.event_dict()
+        if not new_event:
+            return
+        self._push_history()
+        self.recorder.events.append(new_event)
+        self.recorder.events.sort(key=lambda e: e.get('t_ms', 0))
+        self._refresh_after_edit('이벤트 1개 추가')
 
     def _delete_selected(self):
         if self.recorder.recording:

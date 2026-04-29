@@ -90,11 +90,12 @@ def try_download_silent(url, dst, headers=None):
 
 def _normalize_spell_stem(stem):
     """Canonicalize trailing ordinal so 'LeeSinQOne' and 'LeeSinQ1' compare equal,
-    but 'LeeSinQ2' stays distinct."""
+    but 'LeeSinQ2' stays distinct. Strips non-alphanumeric so 'Akali_R' equates
+    to 'AkaliR'."""
     m = _ORDINAL_TAIL_RE.search(stem)
     if m:
         stem = stem[: m.start()] + _ORDINAL_WORD_TO_DIGIT[m.group(1).lower()]
-    return stem.lower()
+    return ''.join(c for c in stem if c.isalnum()).lower()
 
 
 def cdragon_extra_spell_icons(champ_id, primary_stems):
@@ -123,12 +124,15 @@ def cdragon_extra_spell_icons(champ_id, primary_stems):
         seen.add(key)
         if _normalize_spell_stem(icon_id) in primary_stems:
             continue
-        # slot letter: first char after champion id, if it is Q/W/E/R
+        # slot letter: first alphanumeric after champion id, if it is Q/W/E/R.
+        # Some champions (Akali, Yasuo, etc) use underscores like 'Akali_R2'.
         slot = None
         if key.startswith(champ_lower) and len(key) > len(champ_lower):
-            c = key[len(champ_lower)].upper()
-            if c in ('Q', 'W', 'E', 'R'):
-                slot = c
+            rest = key[len(champ_lower):]
+            while rest and not rest[0].isalnum():
+                rest = rest[1:]
+            if rest and rest[0].upper() in ('Q', 'W', 'E', 'R'):
+                slot = rest[0].upper()
         png_url = f'{CDRAGON_BASE}/game/assets/characters/{champ_lower}/hud/icons2d/{key}.png'
         out.append((icon_id, png_url, slot))
     return out

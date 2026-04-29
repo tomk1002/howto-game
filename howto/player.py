@@ -16,7 +16,7 @@ No game input is injected. The overlay is purely visual.
 
 import os
 import time
-from PyQt6.QtCore import Qt, QTimer, QRectF, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QRectF, QSize, QPoint, QSettings, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
 from PyQt6.QtMultimedia import QMediaPlayer
 from PyQt6.QtWidgets import (
@@ -162,6 +162,7 @@ class TimelineStrip(QWidget):
     def __init__(self):
         super().__init__()
         self._scale_idx = self.DEFAULT_SCALE_INDEX
+        self.show_user_inputs = True  # consulted by _update_min_height
         self._update_min_height()
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.steps = []
@@ -170,6 +171,15 @@ class TimelineStrip(QWidget):
         self.current_step = -1
         self.user_inputs = []  # list of {t_ms, label}
         self.key_icons = {}  # mapping from uppercase key label -> QPixmap
+
+    def set_show_user_inputs(self, on):
+        on = bool(on)
+        if on == self.show_user_inputs:
+            return
+        self.show_user_inputs = on
+        self._update_min_height()
+        self.updateGeometry()
+        self.update()
 
     @property
     def scale(self):
@@ -197,12 +207,17 @@ class TimelineStrip(QWidget):
 
     def _update_min_height(self):
         step_block = self.DEFAULT_LANE_RESERVE * (self.BOX_HEIGHT + self.LANE_GAP)
-        user_block = self.USER_LANE_RESERVE * (self.BOX_HEIGHT + self.LANE_GAP)
+        if self.show_user_inputs:
+            user_block = self.USER_LANE_RESERVE * (self.BOX_HEIGHT + self.LANE_GAP)
+            gap = self.USER_LANE_GAP
+        else:
+            user_block = 0
+            gap = 6
         h = (
             self.LANE_TOP_Y
             + step_block
             + 6                         # space before axis
-            + self.USER_LANE_GAP        # axis-to-user gap
+            + gap                       # axis-to-user gap (collapsed if hidden)
             + user_block
             + 20                        # time-label row
         )
@@ -303,11 +318,15 @@ class TimelineStrip(QWidget):
 
         plot_w = max(self.width() - 2 * self.MARGIN_X, 100)
         step_lanes, n_step_lanes = self._assign_lanes(self.steps, plot_w)
-        user_lanes, n_user_lanes = self._assign_lanes(self.user_inputs, plot_w)
+        if self.show_user_inputs:
+            user_lanes, n_user_lanes = self._assign_lanes(self.user_inputs, plot_w)
+        else:
+            user_lanes, n_user_lanes = [], 0
         step_block_h = n_step_lanes * self.BOX_HEIGHT + (n_step_lanes - 1) * self.LANE_GAP
         user_block_h = max(0, n_user_lanes * self.BOX_HEIGHT + (n_user_lanes - 1) * self.LANE_GAP)
         axis_y = self.LANE_TOP_Y + step_block_h + 6
-        user_top_y = axis_y + self.USER_LANE_GAP
+        gap = self.USER_LANE_GAP if self.show_user_inputs else 6
+        user_top_y = axis_y + gap
         grid_bottom = user_top_y + user_block_h + 4
 
         # --- time grid ---
@@ -391,6 +410,9 @@ class TimelineStrip(QWidget):
                 painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
         # --- user input boxes (mirror step boxes, blue palette) ---
+        if not self.show_user_inputs:
+            self._draw_playhead(painter, plot_w, grid_bottom)
+            return
         painter.setFont(text_font)
         max_t = self.duration_ms
         for i, evt in enumerate(self.user_inputs):
@@ -434,10 +456,111 @@ class TimelineStrip(QWidget):
                 painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
         # --- playhead ---
-        if self.playhead_ms is not None:
-            x = int(self._x_for(self.playhead_ms, plot_w))
-            painter.setPen(QPen(COLOR_PLAYHEAD, 2))
-            painter.drawLine(x, self.LANE_TOP_Y - 2, x, grid_bottom)
+        self._draw_playhead(painter, plot_w, grid_bottom)
+
+    def _draw_playhead(self, painter, plot_w, grid_bottom):
+        if self.playhead_ms is None:
+            return
+        x = int(self._x_for(self.playhead_ms, plot_w))
+        painter.setPen(QPen(COLOR_PLAYHEAD, 2))
+        painter.drawLine(x, self.LANE_TOP_Y - 2, x, grid_bottom)
+
+
+# ============================================================
+# End-of-run summary widget — big score + per-step quality strip
+# ============================================================
+
+class RunSummaryWidget(QWidget):
+    """Shown in place of the timeline strip for a few seconds after a
+    one-shot run. Top: big score number. Bottom: a horizontal row of
+    each demo step, colored by the user's match quality on that step."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 12, 16, 12)
+        outer.setSpacing(14)
+
+        self.lbl_score = QLabel('')
+        self.lbl_score.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_score.setStyleSheet(
+            'color: #ffd33d; font-weight: 900; font-size: 110px;'
+        )
+        outer.addWidget(self.lbl_score, 3)
+
+        self.steps_host = QWidget()
+        self.steps_layout = QHBoxLayout(self.steps_host)
+        self.steps_layout.setContentsMargins(0, 0, 0, 0)
+        self.steps_layout.setSpacing(8)
+        self.steps_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.addWidget(self.steps_host, 1)
+
+    def set_summary(self, score_text, score_color, steps_data):
+        """steps_data: iterable of (label, quality, icon_pixmap_or_none)."""
+        self.lbl_score.setText(score_text)
+        self.lbl_score.setStyleSheet(
+            f'color: {score_color}; font-weight: 900; font-size: 110px;'
+        )
+        # clear any boxes from a previous run
+        while self.steps_layout.count():
+            item = self.steps_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for label, quality, icon in steps_data:
+            self.steps_layout.addWidget(self._make_box(label, quality, icon))
+
+    QUALITY_TEXT = {
+        'perfect': 'Perfect',
+        'good':    'Good',
+        'ok':      'Ok',
+        'miss':    'Miss',
+    }
+
+    @classmethod
+    def _make_box(cls, label, quality, icon):
+        quality = quality or 'miss'
+        border_color = QUALITY_BORDER.get(quality, COLOR_USER_BORDER)
+        border = border_color.name()
+
+        cell = QWidget()
+        v = QVBoxLayout(cell)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        v.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+
+        box = QLabel()
+        box.setFixedSize(56, 56)
+        box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        box.setStyleSheet(
+            f'QLabel {{'
+            f'  background: rgba(20, 41, 68, 200);'
+            f'  border: 3px solid {border};'
+            f'  border-radius: 8px;'
+            f'  color: #cce6ff;'
+            f'  font: bold 22px Consolas;'
+            f'}}'
+        )
+        if icon is not None and not icon.isNull():
+            box.setPixmap(icon.scaled(
+                50, 50,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        else:
+            box.setText(_format_input(label)[:3])
+        box.setToolTip(quality)
+        v.addWidget(box, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        text = QLabel(cls.QUALITY_TEXT.get(quality, 'Miss'))
+        text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        text.setStyleSheet(
+            f'color: {border}; font: 700 13px Consolas;'
+            f' background: transparent; border: none;'
+        )
+        v.addWidget(text, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        return cell
 
 
 # ============================================================
@@ -468,6 +591,7 @@ class PlayerWindow(QWidget):
         self._playing = False
         self._drag_pos = None
         self._matched_steps = set()
+        self._step_quality = {}  # step_index -> 'good' | 'ok'   (unmatched implicitly 'miss')
         self._score = 0
         self._play_once_active = False
         self._countdown_remaining = 0
@@ -505,6 +629,7 @@ class PlayerWindow(QWidget):
         self.timeline_strip.set_playhead(0)
         # Always pass through; empty dict → text fallback per-step in paintEvent.
         self.timeline_strip.set_key_icons(key_icons or {})
+        self._load_prefs()
         self._update_score_label()
         self._apply_speed()
 
@@ -535,6 +660,7 @@ class PlayerWindow(QWidget):
                 padding: 0;
             }
             QPushButton:hover { background: rgba(126,231,135,40); border-color: rgba(126,231,135,120); color: #7ee787; }
+            QPushButton:checked { background: rgba(121,192,255,55); border-color: rgba(121,192,255,160); color: #79c0ff; }
             QLabel { color: #d7dae0; font-family: Consolas, monospace; }
             """
         )
@@ -573,6 +699,13 @@ class PlayerWindow(QWidget):
         self.btn_speed.setToolTip('재생 속도 (클릭하면 다음 단계로 순환)')
         self.btn_speed.clicked.connect(self._cycle_speed)
         header.addWidget(self.btn_speed)
+        self.btn_show_inputs = QPushButton('나')
+        self.btn_show_inputs.setFixedSize(28, 22)
+        self.btn_show_inputs.setCheckable(True)
+        self.btn_show_inputs.setChecked(True)
+        self.btn_show_inputs.setToolTip('내 입력 박스 표시 (체크 시 보임)')
+        self.btn_show_inputs.toggled.connect(self._on_toggle_user_inputs)
+        header.addWidget(self.btn_show_inputs)
         self.btn_zoom_out = QPushButton('−')
         self.btn_zoom_out.setFixedSize(22, 22)
         self.btn_zoom_out.setToolTip('아이콘 작게')
@@ -596,14 +729,19 @@ class PlayerWindow(QWidget):
         self.lbl_big_countdown.setStyleSheet(
             'color: #ffd33d; font-weight: 900; font-size: 140px;'
         )
+        self.summary_widget = RunSummaryWidget()
         self._body_stack = QStackedWidget()
-        self._body_stack.addWidget(self.timeline_strip)   # idx 0
+        self._body_stack.addWidget(self.timeline_strip)     # idx 0
         self._body_stack.addWidget(self.lbl_big_countdown)  # idx 1
+        self._body_stack.addWidget(self.summary_widget)     # idx 2
         inner.addWidget(self._body_stack, 1)
 
     # ------------------------------------------------------------------
     # Playback control
     # ------------------------------------------------------------------
+
+    def _on_toggle_user_inputs(self, on):
+        self.timeline_strip.set_show_user_inputs(on)
 
     def _speed_label(self):
         return f'{SPEED_STEPS[self._speed_idx]:g}×'
@@ -659,12 +797,22 @@ class PlayerWindow(QWidget):
         self._score_summary_active = True
         p = self._score_percent()
         c = self._color_for_percent(p)
-        self.lbl_big_countdown.setText(f'{p}/100')
-        self.lbl_big_countdown.setStyleSheet(
-            f'color: {c}; font-weight: 900; font-size: 140px;'
+        self.summary_widget.set_summary(
+            f'{p}점!', c, self._build_summary_steps(),
         )
-        self._body_stack.setCurrentIndex(1)
-        QTimer.singleShot(3000, self._dismiss_score_summary)
+        self._body_stack.setCurrentIndex(2)
+        QTimer.singleShot(8000, self._dismiss_score_summary)
+
+    def _build_summary_steps(self):
+        """Returns (label, quality, icon_pixmap) per demo step, in order."""
+        out = []
+        key_icons = self.timeline_strip.key_icons
+        for i, s in enumerate(self.steps):
+            label = _format_input(s['input'])
+            quality = self._step_quality.get(i, 'miss')
+            icon = s.get('icon_pixmap') or key_icons.get(label.upper())
+            out.append((label, quality, icon))
+        return out
 
     def _dismiss_score_summary(self):
         if not self._score_summary_active:
@@ -805,6 +953,7 @@ class PlayerWindow(QWidget):
         quality, points, matched_idx = self._match_to_step(t_ms, label)
         if matched_idx is not None:
             self._matched_steps.add(matched_idx)
+            self._step_quality[matched_idx] = quality
             self._score += points
         self.timeline_strip.add_user_input(t_ms, label, quality)
         self._update_score_label()
@@ -857,6 +1006,7 @@ class PlayerWindow(QWidget):
 
     def _reset_score(self):
         self._matched_steps.clear()
+        self._step_quality.clear()
         self._score = 0
         self._update_score_label()
 
@@ -885,7 +1035,56 @@ class PlayerWindow(QWidget):
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
 
+    # ------------------------------------------------------------------
+    # Persistent prefs (QSettings — Windows registry / ini / etc)
+    # ------------------------------------------------------------------
+
+    _SETTINGS_ORG = 'HowTo'
+    _SETTINGS_APP = 'OverlayPlayer'
+
+    def _load_prefs(self):
+        s = QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
+        sz = s.value('size')
+        if isinstance(sz, QSize) and sz.isValid():
+            self.resize(sz)
+        pos = s.value('pos')
+        if isinstance(pos, QPoint):
+            self.move(pos)
+        si = s.value('scale_idx')
+        if si is not None:
+            try:
+                si = int(si)
+            except (TypeError, ValueError):
+                si = None
+            if si is not None and 0 <= si < len(TimelineStrip.SCALE_STEPS):
+                self.timeline_strip._scale_idx = si
+                self.timeline_strip._update_min_height()
+                self.timeline_strip.updateGeometry()
+                self.timeline_strip.update()
+        sp = s.value('speed_idx')
+        if sp is not None:
+            try:
+                sp = int(sp)
+            except (TypeError, ValueError):
+                sp = None
+            if sp is not None and 0 <= sp < len(SPEED_STEPS):
+                self._speed_idx = sp
+        show_inputs = s.value('show_user_inputs')
+        if show_inputs is not None:
+            on = str(show_inputs).lower() not in ('false', '0', 'no')
+            self.btn_show_inputs.setChecked(on)
+            self.timeline_strip.set_show_user_inputs(on)
+
+    def _save_prefs(self):
+        s = QSettings(self._SETTINGS_ORG, self._SETTINGS_APP)
+        s.setValue('size', self.size())
+        s.setValue('pos', self.pos())
+        s.setValue('scale_idx', self.timeline_strip._scale_idx)
+        s.setValue('speed_idx', self._speed_idx)
+        s.setValue('show_user_inputs', self.timeline_strip.show_user_inputs)
+
     def closeEvent(self, e):
+        self._save_prefs()
         self._stop()
         try:
             if self._kb_listener:
