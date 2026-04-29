@@ -16,7 +16,7 @@ No game input is injected. The overlay is purely visual.
 
 import os
 import time
-from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF
+from PyQt6.QtCore import Qt, QTimer, QRectF, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
 from PyQt6.QtMultimedia import QMediaPlayer
 from PyQt6.QtWidgets import (
@@ -89,7 +89,7 @@ def _format_input(value):
 # Horizontal timeline strip
 # ============================================================
 
-COLOR_BG = QColor('#0d1014')
+COLOR_BG = QColor(13, 16, 20, 150)
 COLOR_GRID = QColor('#1a1e23')
 COLOR_AXIS = QColor('#262b32')
 COLOR_TIME_LABEL = QColor('#6b7280')
@@ -106,7 +106,12 @@ COLOR_STEP_PAST_FILL = QColor(60, 60, 60, 120)
 COLOR_STEP_PAST_BORDER = QColor(110, 110, 110, 200)
 COLOR_STEP_PAST_TEXT = QColor(180, 180, 180, 200)
 
-COLOR_USER_MARKER = QColor('#79c0ff')
+# user-input boxes (mirror the step-box rendering, blue palette so the user's
+# actual presses sit visually parallel to the green demo sequence)
+COLOR_USER_FILL = QColor('#142944')
+COLOR_USER_BORDER = QColor('#3984c6')
+COLOR_USER_TEXT = QColor('#cce6ff')
+
 COLOR_PLAYHEAD = QColor('#ff7b72')
 
 
@@ -164,13 +169,18 @@ class TimelineStrip(QWidget):
         self.update()
         return True
 
+    USER_LANE_RESERVE = 2
+
     def _update_min_height(self):
+        step_block = self.DEFAULT_LANE_RESERVE * (self.BOX_HEIGHT + self.LANE_GAP)
+        user_block = self.USER_LANE_RESERVE * (self.BOX_HEIGHT + self.LANE_GAP)
         h = (
             self.LANE_TOP_Y
-            + self.DEFAULT_LANE_RESERVE * (self.BOX_HEIGHT + self.LANE_GAP)
-            + 6
-            + self.USER_LANE_GAP
-            + max(26, int(20 * self.scale))
+            + step_block
+            + 6                         # space before axis
+            + self.USER_LANE_GAP        # axis-to-user gap
+            + user_block
+            + 20                        # time-label row
         )
         self.setMinimumHeight(h)
 
@@ -182,8 +192,17 @@ class TimelineStrip(QWidget):
     def set_steps(self, steps):
         self.steps = list(steps)
         last_t = max((s['t_ms'] for s in self.steps), default=0)
-        self.duration_ms = max(1000, last_t + 500)
+        self._steps_duration = max(1000, last_t + 500)
+        self.duration_ms = max(self.duration_ms, self._steps_duration)
         self.update()
+
+    def ensure_duration(self, ms):
+        """Extend the timeline so a t_ms ≤ ``ms`` event is in-bounds.
+        Used when video length or live user input runs past the last demo step."""
+        ms = int(max(0, ms))
+        if ms > self.duration_ms:
+            self.duration_ms = ms
+            self.update()
 
     def set_playhead(self, ms):
         self.playhead_ms = int(max(0, ms))
@@ -197,10 +216,14 @@ class TimelineStrip(QWidget):
         self.update()
 
     def add_user_input(self, t_ms, label):
-        self.user_inputs.append({'t_ms': int(max(0, t_ms)), 'label': label})
+        t = int(max(0, t_ms))
+        self.user_inputs.append({'t_ms': t, 'label': label})
         # cap memory
         if len(self.user_inputs) > 200:
             self.user_inputs = self.user_inputs[-200:]
+        # grow the strip if the user pressed past the demo's end
+        if t + 200 > self.duration_ms:
+            self.duration_ms = t + 200
         self.update()
 
     def clear_user_inputs(self):
@@ -227,14 +250,14 @@ class TimelineStrip(QWidget):
         painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
 
-    def _assign_lanes(self, plot_w):
-        """Greedy left-to-right lane packing — return per-step lane index."""
+    def _assign_lanes(self, items, plot_w):
+        """Greedy left-to-right lane packing for any iterable of {t_ms} dicts."""
         lane_right_edges = []
-        step_lanes = []
+        lanes = []
         half_w = self.BOX_WIDTH / 2
         pad = 2
-        for s in self.steps:
-            cx = self._x_for(s['t_ms'], plot_w)
+        for it in items:
+            cx = self._x_for(it['t_ms'], plot_w)
             box_left = cx - half_w
             box_right = cx + half_w
             chosen = -1
@@ -246,8 +269,8 @@ class TimelineStrip(QWidget):
             if chosen == -1:
                 lane_right_edges.append(box_right)
                 chosen = len(lane_right_edges) - 1
-            step_lanes.append(chosen)
-        return step_lanes, max(len(lane_right_edges), 1)
+            lanes.append(chosen)
+        return lanes, max(len(lane_right_edges), 1)
 
     def paintEvent(self, _e):
         painter = QPainter(self)
@@ -255,16 +278,19 @@ class TimelineStrip(QWidget):
         painter.fillRect(self.rect(), COLOR_BG)
 
         plot_w = max(self.width() - 2 * self.MARGIN_X, 100)
-        step_lanes, n_lanes = self._assign_lanes(plot_w)
-        lanes_block_h = n_lanes * self.BOX_HEIGHT + (n_lanes - 1) * self.LANE_GAP
-        axis_y = self.LANE_TOP_Y + lanes_block_h + 6
-        user_lane_y = axis_y + self.USER_LANE_GAP
+        step_lanes, n_step_lanes = self._assign_lanes(self.steps, plot_w)
+        user_lanes, n_user_lanes = self._assign_lanes(self.user_inputs, plot_w)
+        step_block_h = n_step_lanes * self.BOX_HEIGHT + (n_step_lanes - 1) * self.LANE_GAP
+        user_block_h = max(0, n_user_lanes * self.BOX_HEIGHT + (n_user_lanes - 1) * self.LANE_GAP)
+        axis_y = self.LANE_TOP_Y + step_block_h + 6
+        user_top_y = axis_y + self.USER_LANE_GAP
+        grid_bottom = user_top_y + user_block_h + 4
 
         # --- time grid ---
         painter.setPen(QPen(COLOR_GRID, 1))
         for t in range(0, self.duration_ms + 1, 500):
             x = int(self._x_for(t, plot_w))
-            painter.drawLine(x, self.LANE_TOP_Y, x, user_lane_y + 16)
+            painter.drawLine(x, self.LANE_TOP_Y, x, grid_bottom)
 
         # axis line
         painter.setPen(QPen(COLOR_AXIS, 1))
@@ -340,24 +366,53 @@ class TimelineStrip(QWidget):
                 painter.setPen(QPen(text_color))
                 painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
-        # --- user input markers (under axis) ---
-        painter.setFont(QFont('Consolas', 9))
+        # --- user input boxes (mirror step boxes, blue palette) ---
+        painter.setFont(text_font)
         max_t = self.duration_ms
-        for evt in self.user_inputs:
+        for i, evt in enumerate(self.user_inputs):
             t = evt['t_ms']
             if t > max_t:
                 continue
-            x = self._x_for(t, plot_w)
-            painter.setBrush(COLOR_USER_MARKER)
-            painter.setPen(QPen(COLOR_USER_MARKER, 1))
-            painter.drawEllipse(QPointF(x, user_lane_y), 3.0, 3.0)
-            painter.drawText(QPointF(x - 8, user_lane_y + 14), _format_input(evt['label'])[:4])
+            lane = user_lanes[i]
+            cx = self._x_for(t, plot_w)
+            y = user_top_y + lane * (self.BOX_HEIGHT + self.LANE_GAP)
+            box = QRectF(cx - self.BOX_WIDTH / 2, y, self.BOX_WIDTH, self.BOX_HEIGHT)
+            label = _format_input(evt['label'])
+            text = label[:4]
+            icon = self.key_icons.get(label.upper())
+
+            if icon is not None and not icon.isNull():
+                painter.save()
+                painter.setOpacity(0.92)
+                pad = max(2, int(3 * self.scale))
+                w = int(self.BOX_WIDTH - pad * 2)
+                h = int(self.BOX_HEIGHT - pad * 2)
+                scaled = icon.scaled(
+                    w, h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                tx = box.x() + (self.BOX_WIDTH - scaled.width()) / 2
+                ty = y + (self.BOX_HEIGHT - scaled.height()) / 2
+                painter.drawPixmap(int(tx), int(ty), scaled)
+                painter.restore()
+                self._draw_label_on_icon(painter, box, text, text_font, False)
+                painter.setPen(QPen(COLOR_USER_BORDER, 2))
+                painter.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+                painter.drawRoundedRect(box, 5, 5)
+                painter.setFont(text_font)
+            else:
+                painter.setBrush(COLOR_USER_FILL)
+                painter.setPen(QPen(COLOR_USER_BORDER, 1.5))
+                painter.drawRoundedRect(box, 5, 5)
+                painter.setPen(QPen(COLOR_USER_TEXT))
+                painter.drawText(box, Qt.AlignmentFlag.AlignCenter, text)
 
         # --- playhead ---
         if self.playhead_ms is not None:
             x = int(self._x_for(self.playhead_ms, plot_w))
             painter.setPen(QPen(COLOR_PLAYHEAD, 2))
-            painter.drawLine(x, self.LANE_TOP_Y - 2, x, user_lane_y + 18)
+            painter.drawLine(x, self.LANE_TOP_Y - 2, x, grid_bottom)
 
 
 # ============================================================
@@ -365,6 +420,11 @@ class TimelineStrip(QWidget):
 # ============================================================
 
 class PlayerWindow(QWidget):
+    # Cross-thread relay: pynput callbacks fire on a non-Qt thread without an
+    # event loop, so QTimer.singleShot from there never delivers. Emitting
+    # a Qt signal auto-queues to the receiver's (main) thread instead.
+    user_input_received = pyqtSignal(str)
+
     def __init__(self, events, title='HowTo', media_player=None, key_icons=None):
         super().__init__()
         self.setWindowTitle(title)
@@ -393,7 +453,9 @@ class PlayerWindow(QWidget):
         if self._media_player is not None:
             self._media_player.positionChanged.connect(self._on_external_position)
             self._media_player.playbackStateChanged.connect(self._on_external_state)
+            self._media_player.durationChanged.connect(self._on_external_duration)
 
+        self.user_input_received.connect(self._record_user_input)
         self._kb_listener = keyboard.Listener(on_press=self._on_user_key)
         self._mouse_listener = mouse.Listener(on_click=self._on_user_click)
         self._kb_listener.start()
@@ -421,7 +483,7 @@ class PlayerWindow(QWidget):
         self.frame.setStyleSheet(
             """
             #container {
-                background: rgba(11, 13, 16, 230);
+                background: rgba(11, 13, 16, 150);
                 border: 1px solid rgba(255, 255, 255, 30);
                 border-radius: 8px;
             }
@@ -449,6 +511,10 @@ class PlayerWindow(QWidget):
         self.lbl_title = QLabel(title)
         self.lbl_title.setStyleSheet('color: #7ee787; font-weight: 600; font-size: 12px;')
         header.addWidget(self.lbl_title, 1)
+        self.lbl_input_count = QLabel('입력 0')
+        self.lbl_input_count.setStyleSheet('color: #79c0ff; font-size: 11px;')
+        self.lbl_input_count.setToolTip('pynput가 캡처한 키/마우스 입력 누적 수')
+        header.addWidget(self.lbl_input_count)
         self.btn_play = QPushButton('▶')
         self.btn_play.setFixedSize(28, 22)
         self.btn_play.clicked.connect(self._toggle_play)
@@ -558,6 +624,10 @@ class PlayerWindow(QWidget):
             self.timeline_strip.clear_user_inputs()
         self.timeline_strip.set_playhead(new_t)
 
+    def _on_external_duration(self, ms):
+        if ms and ms > 0:
+            self.timeline_strip.ensure_duration(int(ms) + SYNC_OFFSET_MS)
+
     def _on_external_state(self, state):
         if state == QMediaPlayer.PlaybackState.PlayingState:
             self.btn_play.setText('⏸')
@@ -565,9 +635,10 @@ class PlayerWindow(QWidget):
             self.btn_play.setText('▶')
 
     def _current_time_ms(self):
-        """Return the current playback time in ms (0 if not playing)."""
+        """Return the current playback time in ms, on the same axis as the
+        playhead (so user-input markers line up with the red bar)."""
         if self._media_player is not None:
-            return int(self._media_player.position())
+            return int(self._media_player.position()) + SYNC_OFFSET_MS
         if self._playing and self._start_time is not None:
             return int((time.perf_counter() - self._start_time) * 1000)
         return self.timeline_strip.playhead_ms
@@ -577,17 +648,16 @@ class PlayerWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _on_user_key(self, key):
-        label = _strip_prefix(_key_label(key))
-        QTimer.singleShot(0, lambda: self._record_user_input(label))
+        self.user_input_received.emit(_strip_prefix(_key_label(key)))
 
     def _on_user_click(self, _x, _y, button, pressed):
         if not pressed:
             return
-        label = _strip_prefix(str(button))
-        QTimer.singleShot(0, lambda: self._record_user_input(label))
+        self.user_input_received.emit(_strip_prefix(str(button)))
 
     def _record_user_input(self, label):
         self.timeline_strip.add_user_input(self._current_time_ms(), label)
+        self.lbl_input_count.setText(f'입력 {len(self.timeline_strip.user_inputs)}')
 
     # ------------------------------------------------------------------
     # Frameless window dragging (only via header area, not the strip)
