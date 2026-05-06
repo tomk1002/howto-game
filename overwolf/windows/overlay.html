@@ -427,13 +427,54 @@ window.buildTutfileBlob = ({ title, description, difficulty, tags, characterId, 
     // Task 9 → Task 8 wire-up: take.gameSnapshot가 있으면 game_specific으로 포함
     game_specific: take?.gameSnapshot || {},
   };
-  const inputsJson = {
-    inputs: inputs.map(inp => ({
-      t: Math.round(inp.t),
-      category: inp.key === 'AA' ? 'attack' : 'skill',
-      ref: inp.key === 'AA' ? undefined : `${characterName || ''}${inp.key}`,
-    })),
-  };
+  // ── 입력 자동 분류 ────────────────────────────────────────────────
+  // take.gameSnapshot 에서 아이템·소환사 주문 메타데이터를 가져와
+  // 녹화된 raw 키를 적절한 category 로 매핑한다.
+  const snap = take?.gameSnapshot || {};
+  const items = Array.isArray(snap.required_items) ? snap.required_items : [];
+  const summoners = Array.isArray(snap.summoner_spells) ? snap.summoner_spells : [];
+  // summoner spells: index 0 = D slot, index 1 = F slot
+  // 한글 표시 이름이면 그대로 ref로. 영문 ID로 변환은 web/edit에서 해도 됨.
+
+  function classifyInput({ key, t }) {
+    const out = { t: Math.round(t) };
+    // 1) 평타 / 평타 캔슬
+    if (key === 'AA' || key === 'AttackMove') {
+      out.category = 'attack';
+      return out;
+    }
+    // 2) 숫자 키 1-6 → 아이템 슬롯
+    const numMatch = /^([1-6])$/.exec(key);
+    if (numMatch) {
+      const slot = parseInt(numMatch[1], 10);
+      out.category = 'item';
+      out.slot = slot;
+      const ref = items[slot - 1]; // slot 1 → items[0]
+      if (ref) out.ref = String(ref);
+      return out;
+    }
+    // 3) Q/W/E/R → 챔프 스킬
+    const letter = (key || '').toUpperCase();
+    if (['Q', 'W', 'E', 'R'].includes(letter)) {
+      out.category = 'skill';
+      out.ref = `${characterName || ''}${letter}`;
+      return out;
+    }
+    // 4) D/F → 소환사 주문
+    if (letter === 'D' || letter === 'F') {
+      out.category = 'summoner_spell';
+      out.slot = letter;
+      const ref = letter === 'D' ? summoners[0] : summoners[1];
+      if (ref) out.ref = String(ref);
+      return out;
+    }
+    // 5) 기타 — raw key 보존 (편집 페이지에서 분류)
+    out.category = 'key';
+    out.ref = key;
+    return out;
+  }
+
+  const inputsJson = { inputs: inputs.map(classifyInput) };
   const stepsData = take?.steps?.length > 0 ? take.steps : [];
   const stepsJson = { steps: stepsData };
 
