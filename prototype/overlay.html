@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>ComboGG Overlay</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #07090f;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 60px;
+}
+
+.game-bg {
+  position: fixed; inset: 0; z-index: 0;
+  background:
+    radial-gradient(ellipse 60% 40% at 30% 60%, rgba(20,60,20,0.3) 0%, transparent 70%),
+    radial-gradient(ellipse 50% 60% at 75% 30%, rgba(10,30,80,0.35) 0%, transparent 70%),
+    linear-gradient(160deg, #070d1a 0%, #050a10 100%);
+}
+
+/* ── 오버레이 ─── */
+.overlay {
+  position: relative; z-index: 10;
+  background: rgba(4, 7, 18, 0.88);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 10px;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+  width: 560px;
+  overflow: hidden;
+}
+
+/* ── 플레이 뷰 ─── */
+.view-play { display: flex; flex-direction: column; }
+
+/* 스텝 바 */
+.step-bar {
+  display: flex;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.step-seg {
+  flex: 1;
+  padding: 7px 0;
+  text-align: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: rgba(255,255,255,0.2);
+  letter-spacing: 0.5px;
+  border-right: 1px solid rgba(255,255,255,0.05);
+  transition: all 0.2s;
+  position: relative;
+}
+.step-seg:last-child { border-right: none; }
+.step-seg.active {
+  color: #c8a84a;
+  background: rgba(200,168,74,0.06);
+}
+.step-seg.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 2px;
+  background: #c8a84a;
+  border-radius: 2px 2px 0 0;
+}
+.step-seg.done { color: rgba(200,168,74,0.3); }
+
+/* 메인 입력 영역 */
+.input-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+}
+
+/* 키캡 */
+.keycap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.key {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  font-weight: 800;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  letter-spacing: -0.5px;
+  transition: all 0.15s;
+  /* 키캡 느낌 */
+  box-shadow: 0 3px 0 rgba(0,0,0,0.4);
+}
+
+.key-lbl {
+  font-size: 9px;
+  font-weight: 500;
+  color: rgba(255,255,255,0.3);
+}
+
+/* 현재 키 */
+.keycap.current .key {
+  width: 58px; height: 58px; font-size: 22px;
+  box-shadow: 0 4px 0 rgba(0,0,0,0.5), 0 0 18px rgba(200,168,74,0.3);
+  border: 2px solid rgba(200,168,74,0.7);
+}
+.keycap.current .key-lbl { color: #c8a84a; font-weight: 600; }
+
+/* 다음 키들 */
+.keycap.next-1 .key { width: 42px; height: 42px; font-size: 16px; opacity: 0.6; }
+.keycap.next-2 .key { width: 34px; height: 34px; font-size: 13px; opacity: 0.35; }
+.keycap.next-3 .key { width: 28px; height: 28px; font-size: 10px; opacity: 0.18; }
+.keycap.next-1 .key-lbl { opacity: 0.6; }
+.keycap.next-2 .key-lbl { opacity: 0.35; }
+.keycap.next-3 .key-lbl { opacity: 0.18; }
+
+/* 키 종류별 색상 */
+.k-skill-q { background: #0f2a4a; color: #60b0ff; border-color: #2a5a8a; }
+.k-skill-w { background: #0a2e2a; color: #50e8e0; border-color: #1a5e58; }
+.k-skill-e { background: #162808; color: #80e840; border-color: #2a5010; }
+.k-skill-r { background: #2e0808; color: #ff5050; border-color: #5e1818; }
+.k-attack   { background: #1e1a12; color: #c8b880; border-color: #3e3424; }
+.k-summoner { background: #18103a; color: #a080ff; border-color: #38207a; }
+.k-item     { background: #2a1806; color: #ff9040; border-color: #5a3010; }
+
+/* 히트 플래시 */
+.keycap.current .key.hit-perfect { border-color: #ffd33d !important; box-shadow: 0 4px 0 rgba(0,0,0,0.5), 0 0 24px rgba(255,211,61,0.6) !important; }
+.keycap.current .key.hit-good    { border-color: #7ee787 !important; box-shadow: 0 4px 0 rgba(0,0,0,0.5), 0 0 20px rgba(126,231,135,0.5) !important; }
+.keycap.current .key.hit-ok      { border-color: #79c0ff !important; box-shadow: 0 4px 0 rgba(0,0,0,0.5), 0 0 18px rgba(121,192,255,0.4) !important; }
+.keycap.current .key.hit-miss    { border-color: #ff7b72 !important; animation: shake 0.25s; }
+
+/* 구분선 + 우측 */
+.divider { width: 1px; height: 40px; background: rgba(255,255,255,0.06); flex-shrink: 0; margin: 0 4px; }
+
+.side {
+  display: flex; flex-direction: column; align-items: flex-end;
+  gap: 4px; margin-left: auto; flex-shrink: 0;
+}
+
+.score-num {
+  font-size: 20px; font-weight: 900; color: #ffd33d; line-height: 1;
+  transition: color 0.3s;
+}
+.score-num.orange { color: #ffa657; }
+.score-num.red    { color: #ff7b72; }
+.score-num.gray   { color: rgba(255,255,255,0.2); }
+
+.quality-pop {
+  font-size: 10px; font-weight: 800; letter-spacing: 1.5px;
+  opacity: 0; transform: translateY(3px);
+  transition: opacity 0.12s, transform 0.12s;
+  min-width: 52px; text-align: right;
+}
+.quality-pop.show { opacity: 1; transform: none; }
+.quality-pop.perfect { color: #ffd33d; }
+.quality-pop.good    { color: #7ee787; }
+.quality-pop.ok      { color: #79c0ff; }
+.quality-pop.miss    { color: #ff7b72; }
+
+.speed-tog {
+  font-size: 10px; font-weight: 600;
+  color: rgba(255,255,255,0.22); cursor: pointer; padding: 3px;
+}
+.speed-tog:hover { color: rgba(255,255,255,0.55); }
+
+/* ── 카운트다운 ─── */
+.view-countdown {
+  display: none;
+  flex-direction: column; align-items: center; justify-content: center;
+  padding: 28px; gap: 8px;
+}
+.cd-num { font-size: 88px; font-weight: 900; color: #ffd33d; line-height: 1; }
+.cd-hint { font-size: 11px; color: rgba(255,255,255,0.25); letter-spacing: 1px; }
+
+/* ── 요약 ─── */
+.view-summary {
+  display: none;
+  flex-direction: column; align-items: center;
+  padding: 20px 24px; gap: 14px;
+}
+.sum-score { font-size: 72px; font-weight: 900; line-height: 1; }
+.sum-steps { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+.sum-step { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.sum-step .key {
+  width: 44px; height: 44px; border-radius: 6px; font-size: 16px;
+  font-weight: 800; display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 3px 0 rgba(0,0,0,0.4); border: 2px solid;
+}
+.sum-step .qlbl { font-size: 9px; font-weight: 700; letter-spacing: 0.5px; }
+.q-perfect .key, .q-perfect .qlbl { border-color: #ffd33d; color: #ffd33d; }
+.q-good    .key, .q-good    .qlbl { border-color: #7ee787; color: #7ee787; }
+.q-ok      .key, .q-ok      .qlbl { border-color: #79c0ff; color: #79c0ff; }
+.q-miss    .key, .q-miss    .qlbl { border-color: #ff7b72; color: #ff7b72; }
+
+.sum-replay {
+  font-size: 10px; color: rgba(255,255,255,0.28); cursor: pointer;
+  padding: 4px 12px; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px;
+  transition: all 0.15s;
+}
+.sum-replay:hover { color: white; border-color: rgba(255,255,255,0.3); }
+
+/* 힌트 */
+.hint {
+  position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+  font-size: 10px; color: rgba(255,255,255,0.15); z-index: 20; letter-spacing: 1px;
+}
+
+@keyframes shake {
+  0%,100% { transform: translateX(0); }
+  25%      { transform: translateX(-4px); }
+  75%      { transform: translateX(4px); }
+}
+</style>
+</head>
+<body>
+
+<div class="game-bg"></div>
+
+<div class="overlay" id="overlay">
+
+  <!-- 플레이 -->
+  <div class="view-play" id="viewPlay">
+    <div class="step-bar" id="stepBar"></div>
+    <div class="input-row" id="inputRow">
+      <!-- JS로 렌더 -->
+    </div>
+  </div>
+
+  <!-- 카운트다운 -->
+  <div class="view-countdown" id="viewCD">
+    <div class="cd-num" id="cdNum">3</div>
+    <div class="cd-hint">준비하세요</div>
+  </div>
+
+  <!-- 요약 -->
+  <div class="view-summary" id="viewSum">
+    <div class="sum-score" id="sumScore"></div>
+    <div class="sum-steps" id="sumSteps"></div>
+    <div class="sum-replay" id="sumReplay">다시 하기 (Space)</div>
+  </div>
+
+</div>
+
+<div class="hint" id="hint">Space — 카운트다운 시작 &nbsp;|&nbsp; Q W E R D F A — 입력</div>
+
+<script>
+// ── 콤보 데이터 ─────────────────────────────────────────
+const COMBO = {
+  steps: [
+    { label: "1단 — Q×2 AA", start: 0,    end: 1050 },
+    { label: "2단 — E 진입",  start: 1050, end: 1700 },
+    { label: "3단 — R 마무리",start: 1700, end: 2900 },
+  ],
+  inputs: [
+    { t: 0,    key: "Q",  cls: "k-skill-q", label: "Q 1타" },
+    { t: 380,  key: "AA", cls: "k-attack",  label: "평타" },
+    { t: 700,  key: "Q",  cls: "k-skill-q", label: "Q 2타" },
+    { t: 950,  key: "AA", cls: "k-attack",  label: "평캔" },
+    { t: 1200, key: "E",  cls: "k-skill-e", label: "E" },
+    { t: 1700, key: "R",  cls: "k-skill-r", label: "R 1타" },
+    { t: 2100, key: "AA", cls: "k-attack",  label: "평타" },
+    { t: 2400, key: "Q",  cls: "k-skill-q", label: "Q 3타" },
+  ],
+};
+
+const SCORE_BANDS = [
+  { w: 160, q: "perfect", pts: 150 },
+  { w: 400, q: "good",    pts: 100 },
+  { w: 900, q: "ok",      pts: 50  },
+];
+const MAX_W   = 900;
+const TOTAL   = 2900;
+const SPEEDS  = [0.5, 0.75, 1, 1.5];
+
+// ── 상태 ─────────────────────────────────────────────────
+let phase = "idle";
+let speed = 1, speedIdx = 2;
+let startTime = null, playMs = 0, rafId = null;
+let matched = new Set(), stepQ = {}, score = 0;
+let qualTimer = null;
+
+// ── 빌드 ─────────────────────────────────────────────────
+function buildStepBar() {
+  const bar = document.getElementById("stepBar");
+  bar.innerHTML = "";
+  COMBO.steps.forEach((s, i) => {
+    const el = document.createElement("div");
+    el.className = "step-seg";
+    el.id = `seg-${i}`;
+    el.textContent = s.label;
+    bar.appendChild(el);
+  });
+}
+
+function makeKeycap(inp, sizeClass) {
+  const wrap = document.createElement("div");
+  wrap.className = `keycap ${sizeClass}`;
+  wrap.id = sizeClass === "current" ? "curCap" : "";
+
+  const key = document.createElement("div");
+  key.className = `key ${inp.cls}`;
+  key.id = sizeClass === "current" ? "curKey" : "";
+  key.textContent = inp.key;
+  wrap.appendChild(key);
+
+  if (sizeClass === "current" || sizeClass === "next-1") {
+    const lbl = document.createElement("div");
+    lbl.className = "key-lbl";
+    lbl.textContent = inp.label;
+    wrap.appendChild(lbl);
+  }
+  return wrap;
+}
+
+function renderInputRow(idx) {
+  const row = document.getElementById("inputRow");
+  row.innerHTML = "";
+
+  row.appendChild(makeKeycap(COMBO.inputs[idx], "current"));
+
+  const upcoming = [];
+  for (let i = 1; i <= 3; i++) {
+    if (COMBO.inputs[idx + i]) upcoming.push(COMBO.inputs[idx + i]);
+  }
+  if (upcoming.length) {
+    const div = document.createElement("div");
+    div.style.cssText = "width:1px;height:40px;background:rgba(255,255,255,0.06);flex-shrink:0;margin:0 4px;";
+    row.appendChild(div);
+    upcoming.forEach((n, i) => row.appendChild(makeKeycap(n, `next-${i + 1}`)));
+  }
+
+  // 우측 사이드
+  const side = document.createElement("div");
+  side.className = "side";
+  side.innerHTML = `
+    <div class="score-num gray" id="scoreNum">—</div>
+    <div class="quality-pop" id="qualPop"></div>
+    <div class="speed-tog" id="speedTog">${speed}×</div>
+  `;
+  row.appendChild(side);
+
+  document.getElementById("speedTog").addEventListener("click", cycleSpeed);
+}
+
+// ── 뷰 전환 ─────────────────────────────────────────────
+function show(name) {
+  document.getElementById("viewPlay").style.display = name === "play" ? "flex" : "none";
+  document.getElementById("viewCD").style.display   = name === "cd"   ? "flex" : "none";
+  document.getElementById("viewSum").style.display  = name === "sum"  ? "flex" : "none";
+}
+
+// ── 카운트다운 ───────────────────────────────────────────
+function startCountdown() {
+  if (phase === "playing") return;
+  resetRun();
+  phase = "countdown";
+  show("cd");
+  let n = 3;
+  document.getElementById("cdNum").textContent = n;
+  const iv = setInterval(() => {
+    n--;
+    if (n > 0) {
+      document.getElementById("cdNum").textContent = n;
+    } else {
+      clearInterval(iv);
+      document.getElementById("cdNum").textContent = "GO";
+      setTimeout(startPlay, 400);
+    }
+  }, 1000);
+}
+
+// ── 플레이 ───────────────────────────────────────────────
+function startPlay() {
+  phase = "playing";
+  show("play");
+  buildStepBar();
+  renderInputRow(0);
+  startTime = performance.now();
+  document.getElementById("hint").textContent = "Q W E R D F A — 입력";
+  tick();
+}
+
+let lastIdx = -1;
+
+function tick() {
+  if (phase !== "playing") return;
+  playMs = (performance.now() - startTime) * speed;
+  if (playMs >= TOTAL) { endRun(); return; }
+
+  const idx = getCurIdx(playMs);
+
+  // 현재 입력이 바뀌면 UI 다시 그리기
+  if (idx !== lastIdx) {
+    renderInputRow(idx);
+    lastIdx = idx;
+  }
+
+  // 스텝 바 업데이트
+  COMBO.steps.forEach((s, i) => {
+    const el = document.getElementById(`seg-${i}`);
+    if (!el) return;
+    el.className = "step-seg" + (playMs >= s.start && playMs < s.end ? " active" : playMs >= s.end ? " done" : "");
+  });
+
+  rafId = requestAnimationFrame(tick);
+}
+
+function getCurIdx(ms) {
+  for (let i = COMBO.inputs.length - 1; i >= 0; i--) {
+    if (ms >= COMBO.inputs[i].t) return i;
+  }
+  return 0;
+}
+
+function endRun() {
+  phase = "summary";
+  cancelAnimationFrame(rafId);
+  buildSummary();
+}
+
+// ── 유저 입력 ─────────────────────────────────────────────
+const KEY_MAP = { q:"Q", w:"W", e:"E", r:"R", d:"D", f:"F", a:"AA", " ":"SPACE" };
+
+document.addEventListener("keydown", e => {
+  if (e.repeat) return;
+  const k = e.key.toLowerCase();
+
+  if (k === " ") {
+    if (phase !== "playing") startCountdown();
+    return;
+  }
+  if (phase !== "playing") return;
+
+  const mapped = KEY_MAP[k];
+  if (!mapped) return;
+
+  const { q, pts, idx } = matchStep(playMs, mapped);
+  if (idx !== null) { matched.add(idx); stepQ[idx] = q; score += pts; }
+
+  flashQual(q);
+  flashKey(q);
+});
+
+function matchStep(ms, key) {
+  let bestDt = Infinity, bestIdx = null;
+  COMBO.inputs.forEach((inp, i) => {
+    if (matched.has(i)) return;
+    if (inp.key !== key) return;
+    const dt = Math.abs(ms - inp.t);
+    if (dt > MAX_W) return;
+    if (dt < bestDt) { bestDt = dt; bestIdx = i; }
+  });
+  if (bestIdx === null) return { q: "miss", pts: 0, idx: null };
+  for (const b of SCORE_BANDS) {
+    if (bestDt <= b.w) return { q: b.q, pts: b.pts, idx: bestIdx };
+  }
+  return { q: "miss", pts: 0, idx: null };
+}
+
+function flashQual(q) {
+  const el = document.getElementById("qualPop");
+  if (!el) return;
+  const labels = { perfect:"PERFECT", good:"GOOD", ok:"OK", miss:"MISS" };
+  el.textContent = labels[q];
+  el.className = `quality-pop show ${q}`;
+  clearTimeout(qualTimer);
+  qualTimer = setTimeout(() => el && el.classList.remove("show"), 700);
+
+  // 점수 업데이트
+  updateScore();
+}
+
+function flashKey(q) {
+  const el = document.getElementById("curKey");
+  if (!el) return;
+  el.classList.add(`hit-${q}`);
+  setTimeout(() => el.classList.remove(`hit-${q}`), 350);
+}
+
+function updateScore() {
+  const el = document.getElementById("scoreNum");
+  if (!el) return;
+  const maxPts = COMBO.inputs.length * SCORE_BANDS[0].pts;
+  const pct = Math.round(score * 100 / maxPts);
+  el.textContent = score > 0 ? `${pct}점` : "—";
+  el.className = "score-num" + (score === 0 ? " gray" : pct >= 80 ? "" : pct >= 50 ? " orange" : " red");
+}
+
+// ── 요약 ─────────────────────────────────────────────────
+function buildSummary() {
+  const maxPts = COMBO.inputs.length * SCORE_BANDS[0].pts;
+  const pct = Math.round(score * 100 / maxPts);
+  const color = pct >= 100 ? "#ffd33d" : pct >= 80 ? "#7ee787" : pct >= 50 ? "#ffa657" : "#ff7b72";
+
+  const scoreEl = document.getElementById("sumScore");
+  scoreEl.textContent = `${pct}점`;
+  scoreEl.style.color = color;
+
+  const stepsEl = document.getElementById("sumSteps");
+  stepsEl.innerHTML = "";
+  COMBO.inputs.forEach((inp, i) => {
+    const q = stepQ[i] || "miss";
+    const ql = { perfect:"PERFECT", good:"GOOD", ok:"OK", miss:"MISS" }[q];
+    const el = document.createElement("div");
+    el.className = `sum-step q-${q}`;
+    el.innerHTML = `<div class="key ${inp.cls}">${inp.key}</div><div class="qlbl">${ql}</div>`;
+    stepsEl.appendChild(el);
+  });
+
+  show("sum");
+  document.getElementById("hint").textContent = "Space — 다시 하기";
+}
+
+function resetRun() {
+  score = 0; matched.clear(); stepQ = {}; lastIdx = -1;
+  cancelAnimationFrame(rafId);
+}
+
+// ── 속도 ─────────────────────────────────────────────────
+function cycleSpeed() {
+  if (phase === "playing") {
+    const elapsed = (performance.now() - startTime) * speed;
+    speedIdx = (speedIdx + 1) % SPEEDS.length;
+    speed = SPEEDS[speedIdx];
+    startTime = performance.now() - elapsed / speed;
+  } else {
+    speedIdx = (speedIdx + 1) % SPEEDS.length;
+    speed = SPEEDS[speedIdx];
+  }
+  const el = document.getElementById("speedTog");
+  if (el) el.textContent = speed + "×";
+}
+
+// ── 초기화 ───────────────────────────────────────────────
+document.getElementById("sumReplay").addEventListener("click", startCountdown);
+buildStepBar();
+renderInputRow(0);
+show("play");
+</script>
+</body>
+</html>

@@ -1,0 +1,1978 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ComboGG Overlay</title>
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/fflate@0.8.2/umd/index.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { font-size: 16px; -webkit-font-smoothing: subpixel-antialiased; text-rendering: auto; }
+  body {
+    background: transparent;
+    overflow: hidden;
+    font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+    width: 100vw; height: 100vh;
+    /* 블러 없음 — Overwolf 렌더러에서 화질 저하 방지 */
+  }
+  #root { width: 100%; height: 100%; position: relative; }
+  @keyframes widgetIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+  @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+  @keyframes popIn { 0% { opacity:0; } 100% { opacity:1; } }
+  /* 위젯 스크롤바 */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(0,200,255,0.25); border-radius: 2px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+const IS_OW = typeof overwolf !== 'undefined';
+
+// Windows Virtual Key 코드 → 키 이름 변환
+const VK = {
+  // 알파벳 A-Z (65~90)
+  65:'A',66:'B',67:'C',68:'D',69:'E',70:'F',71:'G',72:'H',73:'I',74:'J',75:'K',
+  76:'L',77:'M',78:'N',79:'O',80:'P',81:'Q',82:'R',83:'S',84:'T',85:'U',
+  86:'V',87:'W',88:'X',89:'Y',90:'Z',
+  // 숫자 (48~57)
+  48:'0',49:'1',50:'2',51:'3',52:'4',53:'5',54:'6',55:'7',56:'8',57:'9',
+  // 숫자패드 (96~105)
+  96:'0',97:'1',98:'2',99:'3',100:'4',101:'5',102:'6',103:'7',104:'8',105:'9',
+  // 펑션키 (112~123)
+  112:'F1',113:'F2',114:'F3',115:'F4',116:'F5',117:'F6',
+  118:'F7',119:'F8',120:'F9',121:'F10',122:'F11',123:'F12',
+  // 특수키
+  32:'SPACE',27:'ESC',13:'ENTER',9:'TAB',
+  16:'SHIFT',17:'CTRL',18:'ALT',
+  192:'`',189:'-',187:'=',219:'[',221:']',220:'\\',186:';',222:"'",188:',',190:'.',191:'/',
+};
+function vkToKey(code) {
+  return VK[code] || String.fromCharCode(code) || String(code);
+}
+const _bus = {};
+const _emit = (e,d) => (_bus[e]||[]).forEach(cb=>cb(d));
+const _on   = (e,cb) => { (_bus[e]=_bus[e]||[]).push(cb); };
+
+if (!IS_OW) setTimeout(() => _emit('champion', { name:'LeeSin', id:'leesin' }), 1000);
+
+window.OW = {
+  onChampion(cb) {
+    if (IS_OW) {
+      // 인게임 챔피언 감지 (5426)
+      overwolf.games.events.onInfoUpdates2.addListener(info => {
+        const c = info?.info?.summoner_info?.champion
+               || info?.info?.me?.champion;
+        if (c) {
+          window._dbgPush(`[GEP] 챔피언 이벤트: ${c}`);
+          cb({ name:c, id:c.toLowerCase() });
+        }
+      });
+      // background가 보내는 메시지 수신 (챔피언 선택 화면 / 소환사 정보)
+      overwolf.windows.onMessageReceived.addListener(msg => {
+        if (msg.id === 'champ_select' && msg.content?.championId) {
+          _emit('champId', msg.content.championId);
+        }
+        if (msg.id === 'summoner_info') {
+          _emit('summonerInfo', msg.content);
+        }
+        if (msg.id === 'game_flow') {
+          _emit('gameFlow', msg.content);
+        }
+      });
+    } else { _on('champion', cb); }
+  },
+  onSummonerInfo(cb) { _on('summonerInfo', cb); },
+  onChampId(cb)      { _on('champId', cb); },
+  onGameFlow(cb)     { _on('gameFlow', cb); },
+  onKeyDown(cb) {
+    if (IS_OW) {
+      overwolf.games.inputTracking.onKeyDown.addListener(e =>
+        cb({ key: vkToKey(e.key), t: performance.now() })
+      );
+    } else {
+      document.addEventListener('keydown', e => {
+        if (!e.repeat) {
+          let key = e.key;
+          // 브라우저 key명 → OW VK명과 통일 (F1-F12는 이미 일치)
+          const NORM = { Escape:'ESC', Enter:'ENTER', Tab:'TAB', ' ':'SPACE', Control:'CTRL', Shift:'SHIFT', Alt:'ALT' };
+          key = key.length === 1 ? key.toUpperCase() : (NORM[key] || key);
+          cb({ key, t: performance.now() });
+        }
+      });
+    }
+  },
+  // AA: 마우스 좌클릭 감지 (어택무브 포함, 클릭 스팸도 자연스럽게 매칭됨)
+  onMouseDown(cb) {
+    if (IS_OW) {
+      overwolf.games.inputTracking.onMouseDown.addListener(e => {
+        if (e.button === 0) cb({ key:'AA', t: performance.now() });
+      });
+    } else {
+      document.addEventListener('mousedown', e => {
+        if (e.button === 0) cb({ key:'AA', t: performance.now() });
+      });
+    }
+  },
+  onHotkey(name, cb) {
+    if (IS_OW) {
+      overwolf.settings.hotkeys.onPressed.addListener(e => { if (e.name===name) cb(); });
+    }
+  },
+};
+
+// Data Dragon
+window.ddUrl = (patch, type, id) =>
+  `https://ddragon.leagueoflegends.com/cdn/${patch}/img/${type}/${id}`;
+
+// 전역 debug 로그 (React 외부 코드도 사용)
+window._dbgLines = [];
+window._dbgPush = (msg) => {
+  const line = new Date().toLocaleTimeString('ko', {hour12:false}) + ' ' + msg;
+  window._dbgLines = [line, ...window._dbgLines].slice(0, 14);
+  window._dbgCallback?.(window._dbgLines);
+  console.log('[CGG]', msg);
+};
+
+window.fetchChampionData = async (champName) => {
+  try {
+    const versions = await fetch('https://ddragon.leagueoflegends.com/api/versions.json').then(r=>r.json());
+    const patch = versions[0];
+    // "Lee Sin" → "LeeSin" (공백 제거로 DataDragon 키 변환)
+    const key = champName.replace(/\s+/g, '');
+    const data = await fetch(
+      `https://ddragon.leagueoflegends.com/cdn/${patch}/data/en_US/champion/${key}.json`
+    ).then(r=>r.json());
+    return { patch, champ: data.data[key] };
+  } catch(e) {
+    window._dbgPush(`[DDragon] ${champName} 실패: ${e?.message || e}`);
+    return null;
+  }
+};
+
+window.fetchCombos = async (characterId) => {
+  const url = `https://combogg-web.vercel.app/api/combos?game=lol&character=${characterId}&limit=20`;
+  window._dbgPush(`[API] GET character=${characterId}`);
+  try {
+    const r = await fetch(url);
+    if (!r.ok) {
+      window._dbgPush(`[API] HTTP ${r.status}`);
+      return [];
+    }
+    const d = await r.json();
+    const list = Array.isArray(d) ? d
+               : Array.isArray(d.items) ? d.items
+               : Array.isArray(d.combos) ? d.combos
+               : [];
+    window._dbgPush(`[API] ${list.length}개 수신 (${characterId})`);
+    return list.map(normalizeCombo);
+  } catch(e) {
+    window._dbgPush(`[API] 오류: ${e?.message || e}`);
+    return [];
+  }
+};
+
+function normalizeCombo(c) {
+  const rawInputs = c.inputSummary || c.inputs || [];
+  // API는 camelCase로 반환 (durationMs), 로컬 목 데이터는 duration_ms
+  const totalMs = c.durationMs || c.duration_ms || 10000;
+
+  const inputs = rawInputs.map((inp, i) => {
+    // 타이밍 없으면 totalMs 안에서 균등 배분
+    const t = inp.t != null ? inp.t : Math.round((totalMs / Math.max(rawInputs.length, 1)) * i);
+
+    let key, label;
+    if (inp.category === 'attack' || inp.category === 'attack_cancel') {
+      key = 'AA';
+      label = inp.category === 'attack_cancel' ? '평캔' : '평타';
+    } else if (inp.category === 'summoner_spell') {
+      key = String(inp.slot || 'D');
+      label = inp.ref || '소환사 주문';
+    } else if (inp.category === 'item') {
+      key = String(inp.slot || '1');
+      // 아이템 ID를 라벨로 표시 (아이콘은 ref 활용)
+      label = inp.ref ? `아이템` : `슬롯${inp.slot}`;
+    } else if (inp.category === 'skill') {
+      // "LeeSinQ2" → Q, "LeeSinW2" → W, "RivenQ" → Q 등
+      // 스킬 레터만 추출 (뒤에 붙는 숫자는 2번째 발동 표시이므로 키는 동일)
+      key = inp.ref?.match(/([QWER])\d*$/)?.[1]
+          || inp.ref?.replace(/^[A-Za-z]+/, '')[0]
+          || inp.key || '?';
+      // 라벨: Q, Q2(재발동), W2(재발동) 등
+      const skillSuffix = inp.ref?.match(/[QWER](\d*)$/)?.[1];
+      label = key + (skillSuffix ? (skillSuffix === '2' ? ' 재발동' : ` ${skillSuffix}타`) : '');
+    } else {
+      key = inp.ref?.replace(/^[A-Za-z]+/, '') || inp.key || '?';
+      label = inp.label || inp.ref || inp.category || '?';
+    }
+
+    return { t, key, label };
+  });
+
+  return {
+    id: c.id,
+    title: c.title,
+    difficulty: c.difficulty,
+    duration_ms: totalMs,
+    inputs,
+    steps: c.steps || [],
+    game_specific: c.game_specific || c.gameSpecific || null,
+  };
+}
+
+// ── 녹화 .tutfile 로컬 다운로드 ───────────────────────────────────
+window.downloadTutfile = ({ title, difficulty, characterId, characterName, inputs, patch }) => {
+  try {
+    const now = new Date().toISOString();
+    const manifest = {
+      version: '1.0', id: crypto.randomUUID(),
+      title, game: 'lol', character: characterId,
+      difficulty, tags: [],
+      duration_ms: inputs.length ? inputs[inputs.length - 1].t + 200 : 0,
+      patch_version: patch || '15.1',
+      author: 'overlay', created_at: now,
+      game_specific: {},
+    };
+    const inputsJson = {
+      inputs: inputs.map(inp => ({
+        t: Math.round(inp.t),
+        category: inp.key === 'AA' ? 'attack' : 'skill',
+        ref: inp.key === 'AA' ? undefined : `${characterName || ''}${inp.key}`,
+      })),
+    };
+    const stepsJson = { steps: [] };
+
+    const enc = new TextEncoder();
+    const zip = fflate.zipSync({
+      'manifest.json': enc.encode(JSON.stringify(manifest, null, 2)),
+      'inputs.json':   enc.encode(JSON.stringify(inputsJson, null, 2)),
+      'steps.json':    enc.encode(JSON.stringify(stepsJson, null, 2)),
+    });
+    const blob = new Blob([zip], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${title.replace(/[^\w가-힣]/g, '_')}.tutfile`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+    const uploadPage = 'https://combogg-web.vercel.app/upload';
+    if (IS_OW) overwolf.utils.openUrlInDefaultBrowser(uploadPage);
+    else window.open(uploadPage, '_blank');
+
+    return { ok: true };
+  } catch (e) {
+    window._dbgPush(`[record] 다운로드 오류: ${e?.message || e}`);
+    return { ok: false, error: e?.message };
+  }
+};
+
+const MOCK_COMBOS = [
+  {
+    id:'m1', title:'기본 풀콤보', difficulty:'hard', duration_ms:10000,
+    game_specific: {
+      required_level: 6,
+      ability_haste_min: 20,
+      attack_speed_min: 1.5,
+      required_items: ['3142', '3814'],
+    },
+    steps:[{label:'1단',start:0,end:1050},{label:'2단',start:1050,end:1700},{label:'3단',start:1700,end:2900}],
+    inputs:[
+      {t:0,   key:'Q', label:'Q 1타'}, {t:380, key:'AA', label:'평타'},
+      {t:700, key:'Q', label:'Q 2타'}, {t:950, key:'AA', label:'평캔'},
+      {t:1200,key:'E', label:'E'},     {t:1700,key:'R',  label:'R 1타'},
+      {t:2100,key:'AA',label:'평타'},  {t:2400,key:'Q',  label:'Q 3타'},
+    ],
+  },
+  {
+    id:'m2', title:'짧은 견제', difficulty:'easy', duration_ms:10000,
+    game_specific: {
+      required_level: 3,
+      attack_speed_min: 0.9,
+    },
+    steps:[{label:'전부',start:0,end:900}],
+    inputs:[{t:0,key:'Q',label:'Q'},{t:350,key:'AA',label:'평타'},{t:650,key:'E',label:'E'}],
+  },
+];
+
+window.SCORE_BANDS = [
+  { w:160, q:'perfect', pts:150 },
+  { w:400, q:'good',    pts:100 },
+  { w:900, q:'ok',      pts:50  },
+];
+</script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const KEY_STYLES = {
+  Q:  { bg:'rgba(0,30,80,0.72)',   color:'#00d4ff', border:'rgba(0,212,255,0.55)',  glow:'rgba(0,212,255,0.35)'  },
+  W:  { bg:'rgba(0,50,45,0.72)',   color:'#00ffcc', border:'rgba(0,255,200,0.55)',  glow:'rgba(0,255,200,0.35)'  },
+  E:  { bg:'rgba(10,45,0,0.72)',   color:'#aaff00', border:'rgba(170,255,0,0.55)',  glow:'rgba(170,255,0,0.35)'  },
+  R:  { bg:'rgba(60,0,0,0.72)',    color:'#ff2244', border:'rgba(255,34,68,0.55)',  glow:'rgba(255,34,68,0.4)'   },
+  D:  { bg:'rgba(30,0,70,0.72)',   color:'#cc88ff', border:'rgba(180,80,255,0.55)', glow:'rgba(180,80,255,0.35)' },
+  F:  { bg:'rgba(30,0,70,0.72)',   color:'#cc88ff', border:'rgba(180,80,255,0.55)', glow:'rgba(180,80,255,0.35)' },
+  AA: { bg:'rgba(30,20,0,0.72)',   color:'#ffcc44', border:'rgba(255,200,60,0.55)', glow:'rgba(255,200,60,0.35)' },
+  '1':{ bg:'rgba(50,20,0,0.72)',   color:'#ff8833', border:'rgba(255,136,50,0.55)', glow:'rgba(255,136,50,0.35)' },
+  '2':{ bg:'rgba(50,20,0,0.72)',   color:'#ff8833', border:'rgba(255,136,50,0.55)', glow:'rgba(255,136,50,0.35)' },
+  '3':{ bg:'rgba(50,20,0,0.72)',   color:'#ff8833', border:'rgba(255,136,50,0.55)', glow:'rgba(255,136,50,0.35)' },
+  '4':{ bg:'rgba(50,20,0,0.72)',   color:'#ff8833', border:'rgba(255,136,50,0.55)', glow:'rgba(255,136,50,0.35)' },
+  '5':{ bg:'rgba(50,20,0,0.72)',   color:'#ff8833', border:'rgba(255,136,50,0.55)', glow:'rgba(255,136,50,0.35)' },
+  '6':{ bg:'rgba(50,20,0,0.72)',   color:'#ff8833', border:'rgba(255,136,50,0.55)', glow:'rgba(255,136,50,0.35)' },
+};
+const keyStyle = k => KEY_STYLES[k] || { bg:'rgba(20,20,30,0.72)', color:'#99aacc', border:'rgba(100,130,200,0.3)', glow:'rgba(100,130,200,0.2)' };
+
+// AA는 타원형 (클릭 느낌), 나머지는 정사각형
+const Keycap = ({ k, size=36, accent=false, dim=false }) => {
+  const s = keyStyle(k);
+  const isAA = k === 'AA';
+  const glowColor = accent ? 'rgba(255,220,60,0.7)' : s.glow;
+  return (
+    <div style={{
+      width: isAA ? Math.round(size*1.25) : size,
+      height: size,
+      borderRadius: isAA ? size*0.5 : 6,
+      border: `1.5px solid ${accent ? 'rgba(255,220,60,0.95)' : s.border}`,
+      background: accent ? `linear-gradient(135deg,${s.bg},rgba(40,30,0,0.8))` : s.bg,
+      display:'flex', alignItems:'center', justifyContent:'center',
+      fontSize: size * (isAA ? 0.3 : 0.35),
+      fontWeight: 800,
+      color: dim ? 'rgba(255,255,255,0.2)' : (accent ? '#ffe566' : s.color),
+      boxShadow: accent
+        ? `0 0 12px ${glowColor}, 0 0 24px ${glowColor}, 0 2px 0 rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.15)`
+        : dim ? 'none' : `0 0 6px ${s.glow}, 0 2px 0 rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.08)`,
+      transform: accent ? 'translateY(-2px)' : 'none',
+      transition: 'border-color 0.1s, box-shadow 0.1s, transform 0.1s',
+      flexShrink: 0, userSelect:'none',
+      letterSpacing: isAA ? 0 : '-0.5px',
+      textShadow: dim ? 'none' : `0 0 8px ${s.color}`,
+    }}>
+      {k}
+    </div>
+  );
+};
+
+const WIDGET_MIN_W = 180;
+const WIDGET_MIN_H = 100;
+
+const Widget = ({ defaultPos, width, children, visible=true, scale=1 }) => {
+  const [pos,  setPos]  = useState(defaultPos);
+  const [size, setSize] = useState({ w: width, h: null }); // h=null → auto height
+
+  // ── 드래그 이동 (헤더) — clientXY(시각)를 unscaled 좌표로 변환 ──────
+  const onPointerDown = useCallback(e => {
+    if (!e.target.closest('.wh')) return;
+    const startX = e.clientX, startY = e.clientY;
+    const startPX = pos.x,    startPY = pos.y;
+    const onMove = ev => setPos({
+      x: Math.round(startPX + (ev.clientX - startX) / scale),
+      y: Math.round(startPY + (ev.clientY - startY) / scale),
+    });
+    const onUp = ev => {
+      setPos({
+        x: Math.round(startPX + (ev.clientX - startX) / scale),
+        y: Math.round(startPY + (ev.clientY - startY) / scale),
+      });
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    e.preventDefault();
+  }, [pos, scale]);
+
+  // ── 리사이즈 (우하단 모서리) — getBoundingClientRect는 시각 크기 반환 ─
+  const onResizeDown = e => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const rect   = e.currentTarget.parentElement.getBoundingClientRect();
+    const startX = e.clientX, startY = e.clientY;
+    const startW = rect.width  / scale;   // 시각→unscaled
+    const startH = rect.height / scale;
+    const onMove = ev => setSize({
+      w: Math.max(WIDGET_MIN_W, Math.round(startW + (ev.clientX - startX) / scale)),
+      h: Math.max(WIDGET_MIN_H, Math.round(startH + (ev.clientY - startY) / scale)),
+    });
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  if (!visible) return null;
+  return (
+    <div data-widget="true" onPointerDown={onPointerDown} style={{
+      position:'absolute', left:pos.x, top:pos.y,
+      width: size.w,
+      height: size.h ?? 'auto',
+      background:'rgba(8,12,30,0.78)',
+      border:'1.5px solid rgba(0,190,255,0.35)', borderRadius:12,
+      boxShadow:'0 0 0 1px rgba(0,0,0,0.6), 0 16px 40px rgba(0,0,0,0.6), 0 0 30px rgba(0,120,255,0.15)',
+      overflow: size.h ? 'hidden' : 'visible',
+      animation:'widgetIn 0.25s ease', color:'#fff',
+      display:'flex', flexDirection:'column',
+      pointerEvents:'auto',
+    }}>
+      {/* 상단 네온 라인 */}
+      <div style={{ height:2.5, flexShrink:0, background:'linear-gradient(90deg,transparent,rgba(0,200,255,0.9),rgba(140,60,255,0.7),transparent)' }} />
+      {/* 콘텐츠: 리사이즈 시에만 flex:1로 채움, 아닐 때는 자연 높이 */}
+      <div style={{ flex: size.h ? 1 : '0 0 auto', overflowY: size.h ? 'auto' : 'visible', overflowX:'hidden', minWidth:0 }}>
+        {children}
+      </div>
+      {/* 리사이즈 핸들 */}
+      <div onPointerDown={onResizeDown} style={{
+        position:'absolute', right:0, bottom:0, width:18, height:18,
+        cursor:'nwse-resize', zIndex:10, borderRadius:'0 0 10px 0',
+        display:'flex', alignItems:'flex-end', justifyContent:'flex-end',
+        padding:4,
+      }}>
+        {/* 점 3개 패턴 */}
+        <svg width="10" height="10" viewBox="0 0 10 10" style={{ opacity:0.35 }}>
+          <circle cx="8" cy="8" r="1.2" fill="#00d4ff"/>
+          <circle cx="5" cy="8" r="1.2" fill="#00d4ff"/>
+          <circle cx="8" cy="5" r="1.2" fill="#00d4ff"/>
+        </svg>
+      </div>
+    </div>
+  );
+};
+
+const WHeader = ({ title, sub, right }) => (
+  <div className="wh" style={{
+    display:'flex', alignItems:'center', gap:8, padding:'7px 12px 6px',
+    borderBottom:'1px solid rgba(0,190,255,0.1)',
+    background:'linear-gradient(90deg,rgba(0,20,50,0.5),rgba(20,0,50,0.3))',
+    cursor:'grab', userSelect:'none',
+  }}>
+    <span style={{ width:6, height:6, borderRadius:'50%', background:'#00d4ff', boxShadow:'0 0 8px #00d4ff, 0 0 16px rgba(0,212,255,0.5)', flexShrink:0 }} />
+    <span style={{ fontFamily:'monospace', fontSize:13, letterSpacing:2, textTransform:'uppercase', color:'rgba(180,230,255,0.95)', fontWeight:700,
+      textShadow:'0 0 10px rgba(0,200,255,0.6)' }}>
+      {title}
+    </span>
+    {sub && <span style={{ fontFamily:'monospace', fontSize:11, color:'rgba(0,200,255,0.75)', maxWidth:160, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{sub}</span>}
+    <span style={{ flex:1 }} />
+    {right}
+  </div>
+);
+
+// ── 1. 챔피언 위젯 ──────────────────────────────────────────────
+const ChampionWidget = ({ champion, patch }) => {
+  const imgSrc = champion && patch
+    ? `https://ddragon.leagueoflegends.com/cdn/${patch}/img/champion/${champion.name}.png`
+    : null;
+  return (
+    <div style={{ padding:'12px 14px', display:'flex', alignItems:'center', gap:12 }}>
+      <div style={{
+        width:48, height:48, borderRadius:6, flexShrink:0,
+        background:'linear-gradient(135deg,rgba(80,40,10,0.8),rgba(40,20,5,0.9))',
+        border:'1px solid rgba(200,168,74,0.4)', overflow:'hidden',
+        display:'flex', alignItems:'center', justifyContent:'center',
+      }}>
+        {imgSrc
+          ? <img src={imgSrc} width={48} height={48} style={{ display:'block', objectFit:'cover' }}
+              onError={e => { e.currentTarget.style.display='none'; }} />
+          : <span style={{ fontFamily:'monospace', fontSize:11, fontWeight:800, color:'#c8a84a' }}>---</span>
+        }
+      </div>
+      <div>
+        <div style={{ fontSize:9, fontFamily:'monospace', letterSpacing:1, marginBottom:3,
+          color: champion ? 'rgba(100,220,100,0.8)' : 'rgba(255,255,255,0.3)' }}>
+          {champion ? '● 감지됨' : '● 대기 중'}
+        </div>
+        <div style={{ fontSize:18, fontWeight:700, letterSpacing:-0.3 }}>{champion?.name || '—'}</div>
+        <div style={{ fontSize:10, fontFamily:'monospace', color:'rgba(255,255,255,0.4)', marginTop:2 }}>
+          {champion ? 'League of Legends' : '게임 시작을 기다리는 중'}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── 2. 콤보 목록 ────────────────────────────────────────────────
+const DIFF_COLOR = { easy:'#00ffaa', medium:'#00d4ff', hard:'#ff3366' };
+const ComboQueueWidget = ({ combos, activeId, onSelect }) => (
+  <div style={{ maxHeight:260, overflowY:'auto' }}>
+    {combos.length === 0 && (
+      <div style={{ padding:'16px 14px', fontFamily:'monospace', fontSize:11,
+        color:'rgba(255,255,255,0.35)', textAlign:'center', lineHeight:1.8 }}>
+        등록된 콤보 없음<br/>
+        <span style={{ color:'rgba(255,255,255,0.2)' }}>웹에서 콤보를 published 상태로 등록하세요</span>
+      </div>
+    )}
+    {combos.map(c => {
+      const active = c.id === activeId;
+      return (
+        <div key={c.id} onClick={() => onSelect(c.id)} style={{
+          display:'flex', alignItems:'center', gap:8, padding:'7px 12px', cursor:'pointer',
+          background: active ? 'rgba(0,180,255,0.06)' : 'transparent',
+          borderLeft: active ? '2px solid #00d4ff' : '2px solid transparent',
+          boxShadow: active ? 'inset 4px 0 12px rgba(0,180,255,0.08)' : 'none',
+        }}>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:13, fontWeight:600, color:active?'#fff':'rgba(255,255,255,0.8)', marginBottom:3, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+              {c.title}
+            </div>
+            <div style={{ display:'flex', gap:2, alignItems:'center', flexWrap:'nowrap', overflow:'hidden' }}>
+              {c.inputs.slice(0,8).map((inp,i) => (
+                <Keycap key={i} k={inp.key} size={20} />
+              ))}
+              {c.inputs.length > 8 && <span style={{fontSize:10,color:'rgba(255,255,255,0.5)',fontFamily:'monospace',fontWeight:600,flexShrink:0}}>+{c.inputs.length-8}</span>}
+            </div>
+          </div>
+          {active && <span style={{fontSize:9,fontFamily:'monospace',color:'#00d4ff',letterSpacing:1,textShadow:'0 0 8px #00d4ff'}}>ON</span>}
+        </div>
+      );
+    })}
+  </div>
+);
+
+// ── 3. 콤보 조건 체크 ───────────────────────────────────────────
+const ReqChip = ({ label, met, iconUrl, noData }) => {
+  const color  = noData ? 'rgba(255,255,255,0.55)' : met ? '#00ffaa' : '#ff5577';
+  const bg     = noData ? 'rgba(255,255,255,0.06)' : met ? 'rgba(0,255,170,0.1)' : 'rgba(255,40,80,0.13)';
+  const border = noData ? 'rgba(255,255,255,0.15)' : met ? 'rgba(0,255,170,0.4)' : 'rgba(255,40,80,0.5)';
+  const glow   = noData ? 'none' : met ? '0 0 8px rgba(0,255,170,0.3)' : '0 0 8px rgba(255,40,80,0.3)';
+  const icon   = met ? '✓' : '✗';
+  return (
+    <div style={{ display:'flex', alignItems:'center', gap:5, padding:'4px 9px 4px 6px',
+      borderRadius:20, background:bg, border:`1px solid ${border}`,
+      boxShadow:glow, flexShrink:0 }}>
+      {iconUrl
+        ? <img src={iconUrl} width={18} height={18} style={{ borderRadius:3, display:'block' }}
+            onError={e=>e.currentTarget.style.display='none'} />
+        : noData ? null
+        : <span style={{ fontSize:11, fontWeight:900, color, width:14, textAlign:'center',
+            textShadow:`0 0 6px ${color}` }}>{icon}</span>
+      }
+      <span style={{ fontSize:11, fontFamily:'monospace', fontWeight:700, color,
+        textShadow: noData?'none':`0 0 6px ${color}` }}>{label}</span>
+    </div>
+  );
+};
+
+const RequirementsWidget = ({ gameSpecific, playerStats, patch }) => {
+  if (!gameSpecific) return null;
+  const gs  = gameSpecific;
+  const ps  = playerStats;
+  const has = ps !== null; // stats 도착 여부
+
+  const chips = [];
+
+  // 레벨
+  if (gs.required_level != null) {
+    const cur = ps?.level;
+    chips.push(<ReqChip key="lv"
+      label={`Lv ${gs.required_level}`}
+      met={has && cur >= gs.required_level}
+      noData={!has}
+    />);
+  }
+
+  // 스킬 가속 (서버는 cooldownReduction 0~1로 줌, AH = CDR/(1-CDR)*100)
+  if (gs.ability_haste_min != null) {
+    const cur = ps?.abilityHaste;
+    chips.push(<ReqChip key="ah"
+      label={`스킬가속 ${gs.ability_haste_min}`}
+      met={has && cur >= gs.ability_haste_min}
+      noData={!has}
+    />);
+  }
+
+  // 공격 속도
+  if (gs.attack_speed_min != null) {
+    const cur = ps?.attackSpeed;
+    chips.push(<ReqChip key="as"
+      label={`공속 ${gs.attack_speed_min}`}
+      met={has && cur >= gs.attack_speed_min}
+      noData={!has}
+    />);
+  }
+
+  // 아이템
+  if (gs.required_items?.length) {
+    gs.required_items.forEach(itemId => {
+      const met   = has && ps.items?.includes(String(itemId));
+      const iUrl  = patch ? `https://ddragon.leagueoflegends.com/cdn/${patch}/img/item/${itemId}.png` : null;
+      chips.push(<ReqChip key={`item-${itemId}`}
+        label={String(itemId)}
+        met={met}
+        noData={!has}
+        iconUrl={iUrl}
+      />);
+    });
+  }
+
+  if (!chips.length) return null;
+
+  const allMet  = has && chips.every((_, i) => {
+    const gs2 = gameSpecific;
+    if (gs2.required_level    != null && i===0) return ps?.level >= gs2.required_level;
+    return true;
+  });
+  // 간단히 실제 met 계산
+  const metCount = [
+    gs.required_level    != null && has && ps?.level >= gs.required_level,
+    gs.ability_haste_min != null && has && ps?.abilityHaste >= gs.ability_haste_min,
+    gs.attack_speed_min  != null && has && ps?.attackSpeed  >= gs.attack_speed_min,
+    ...(gs.required_items||[]).map(id => has && ps?.items?.includes(String(id))),
+  ].filter(Boolean).length;
+  const totalCount = chips.length;
+  const allGood = has && metCount === totalCount;
+
+  return (
+    <div style={{ padding:'6px 12px 7px', borderBottom:'1px solid rgba(0,180,255,0.08)',
+      background: allGood
+        ? 'rgba(0,255,170,0.03)'
+        : has ? 'rgba(255,40,80,0.03)' : 'rgba(255,255,255,0.02)' }}>
+      {has && (
+        <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:6 }}>
+          <span style={{ fontFamily:'monospace', fontSize:11, fontWeight:700, letterSpacing:1,
+            color: allGood ? '#00ffaa' : '#ff5577',
+            textShadow: allGood ? '0 0 8px rgba(0,255,170,0.5)' : '0 0 8px rgba(255,40,80,0.4)' }}>
+            {allGood ? '✓ 조건 충족' : `⚠ ${totalCount - metCount}개 미충족`}
+          </span>
+        </div>
+      )}
+      <div style={{ display:'flex', flexWrap:'wrap', gap:4 }}>
+        {chips}
+      </div>
+    </div>
+  );
+};
+
+// ── 4. 콤보 시퀀스 — 테이프 뷰 (전체 키 동시 표시) ─────────────
+const QUALITY_LABEL = { perfect:'PERFECT', good:'GOOD', ok:'OK', miss:'MISS' };
+const QUALITY_COLOR = { perfect:'#ffe566', good:'#00ffaa', ok:'#00d4ff', miss:'#ff3366' };
+
+// ── 4. 콤보 시퀀스 — 단계별 전체 가이드 ──────────────────────────
+const ComboSequenceWidget = ({ combo, playMs, totalMs, score, lastQuality, loopMode, runCount, playState, liveInputs }) => {
+  if (!combo) return (
+    <div style={{padding:20,color:'rgba(255,255,255,0.35)',fontSize:13,textAlign:'center',fontFamily:'monospace'}}>
+      콤보를 선택하세요
+    </div>
+  );
+
+  const total   = totalMs || (combo.inputs[combo.inputs.length-1]?.t || 0) + 800;
+  const pct     = Math.min(100, (playMs / total) * 100);
+  const isActive = playState === 'playing';
+  const loopLabel = loopMode === 'inf' ? '∞' : loopMode === 'once' ? '1' : loopMode.replace('x','');
+
+  // 현재 입력 인덱스
+  let curIdx = 0;
+  for (let i = 0; i < combo.inputs.length; i++) {
+    if (playMs >= combo.inputs[i].t) curIdx = i;
+  }
+
+  // 인덱스 포함한 inputs
+  const indexedInputs = combo.inputs.map((inp, gi) => ({ ...inp, gi }));
+
+  // 단계별 그룹 (단계 없으면 전체를 하나로)
+  const groups = combo.steps?.length > 0
+    ? combo.steps.map(s => ({
+        label: s.label,
+        start: s.start, end: s.end,
+        inputs: indexedInputs.filter(inp => inp.t >= s.start && inp.t < s.end),
+      }))
+    : [{ label: null, inputs: indexedInputs }];
+
+  return (
+    <div>
+      {/* ── 단계별 가이드 (전체 동시 표시) ── */}
+      <div style={{ padding:'8px 12px 5px' }}>
+        {groups.map((g, gi) => {
+          const isStep  = g.start != null;
+          const active  = isStep && playMs >= g.start && playMs < g.end;
+          const done    = isStep && playMs >= g.end;
+          return (
+            <div key={gi} style={{
+              display:'flex', alignItems:'center', gap:7,
+              padding:'5px 8px', marginBottom: gi < groups.length-1 ? 4 : 0,
+              borderRadius:6,
+              background: active ? 'rgba(0,200,255,0.07)' : 'rgba(255,255,255,0.02)',
+              borderLeft:`3px solid ${active ? '#00d4ff' : done ? 'rgba(0,200,255,0.22)' : 'rgba(255,255,255,0.07)'}`,
+              transition:'background 0.2s, border-color 0.2s',
+            }}>
+              {/* 단계 레이블 */}
+              {g.label && (
+                <span style={{
+                  fontFamily:'monospace', fontSize:12, fontWeight:700, letterSpacing:1,
+                  minWidth:24, flexShrink:0,
+                  color: active ? '#00d4ff' : done ? 'rgba(0,200,255,0.6)' : 'rgba(255,255,255,0.55)',
+                  textShadow: active ? '0 0 8px rgba(0,200,255,0.7)' : 'none',
+                }}>
+                  {g.label}
+                </span>
+              )}
+              {/* 키 시퀀스 */}
+              <div style={{ display:'flex', gap:3, alignItems:'center', flexWrap:'wrap' }}>
+                {g.inputs.map((inp, ii) => {
+                  const isCur  = inp.gi === curIdx && (active || !isStep);
+                  const isPast = inp.gi < curIdx;
+                  return (
+                    <React.Fragment key={ii}>
+                      {ii > 0 && (
+                        <span style={{ color:'rgba(255,255,255,0.45)', fontSize:12 }}>›</span>
+                      )}
+                      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', gap:1 }}>
+                        <Keycap k={inp.key} size={34} accent={isCur} dim={isPast && !active} />
+                        {isCur && (
+                          <span style={{ fontSize:10, fontFamily:'monospace', color:'#00d4ff',
+                            textShadow:'0 0 8px rgba(0,200,255,0.8)', fontWeight:700, whiteSpace:'nowrap' }}>
+                            {inp.label}
+                          </span>
+                        )}
+                      </div>
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* ── 현재 런 실시간 입력 (가이드 바로 아래) ── */}
+      {(playState === 'playing' || playState === 'countdown') && (
+        <div style={{ padding:'6px 14px 8px',
+          borderTop:'1px solid rgba(255,255,255,0.05)' }}>
+          <div style={{ display:'flex', gap:5, alignItems:'center', flexWrap:'wrap' }}>
+            <span style={{ fontFamily:'monospace', fontSize:10, color:'#00ffaa', letterSpacing:1.5, flexShrink:0,
+              textShadow:'0 0 8px rgba(0,255,170,0.6)' }}>●</span>
+            {liveInputs.length === 0
+              ? <span style={{ fontFamily:'monospace', fontSize:13, color:'rgba(255,255,255,0.55)' }}>대기 중…</span>
+              : liveInputs.slice(-12).map((inp, i) => (
+                  <React.Fragment key={inp.id}>
+                    {i > 0 && <span style={{ color:'rgba(255,255,255,0.45)', fontSize:12 }}>›</span>}
+                    <Keycap k={inp.key} size={28} />
+                  </React.Fragment>
+                ))
+            }
+          </div>
+        </div>
+      )}
+
+      {/* ── 프로그레스 바 + 점수 ── */}
+      <div style={{ padding:'0 14px 10px', display:'flex', alignItems:'center', gap:12 }}>
+        <div style={{ flex:1 }}>
+          <div style={{ height:5, background:'rgba(255,255,255,0.07)', borderRadius:4, overflow:'hidden', position:'relative' }}>
+            <div style={{ height:'100%', width:`${pct}%`,
+              background: isActive ? 'linear-gradient(90deg,#0044cc,#00aaff,#00ffcc)' : 'rgba(255,255,255,0.15)',
+              borderRadius:4, transition:'width 0.05s linear',
+              boxShadow: isActive ? '0 0 12px rgba(0,200,255,0.7)' : 'none' }} />
+            {[25,50,75].map(p => (
+              <div key={p} style={{ position:'absolute', top:0, bottom:0, left:`${p}%`, width:1,
+                background:'rgba(255,255,255,0.1)', pointerEvents:'none' }} />
+            ))}
+          </div>
+          <div style={{ display:'flex', justifyContent:'space-between', marginTop:3,
+            fontFamily:'monospace', fontSize:10, color:'rgba(255,255,255,0.55)' }}>
+            <span style={{ color:'rgba(0,200,255,0.75)' }}>
+              {runCount > 0 ? `${runCount}/${loopLabel} 완료` : `×${loopLabel}`}
+            </span>
+            <span>{(total/1000).toFixed(1)}s</span>
+          </div>
+        </div>
+        {/* 점수 + 판정 */}
+        <div style={{ flexShrink:0, textAlign:'right', minWidth:64 }}>
+          {lastQuality && (
+            <div style={{ fontSize:10, fontWeight:900, letterSpacing:2, color:QUALITY_COLOR[lastQuality],
+              textShadow:`0 0 12px ${QUALITY_COLOR[lastQuality]}`, animation:'fadeIn 0.12s ease', marginBottom:2 }}>
+              {QUALITY_LABEL[lastQuality]}
+            </div>
+          )}
+          <div style={{ fontFamily:'monospace', fontSize:22, fontWeight:900, lineHeight:1,
+            color:score>0?'#ffe566':'rgba(255,255,255,0.35)',
+            textShadow: score>0 ? '0 0 14px rgba(255,220,60,0.6)' : 'none' }}>
+            {score > 0 ? score : '—'}
+          </div>
+          {score > 0 && <div style={{ fontFamily:'monospace', fontSize:10, color:'rgba(255,220,60,0.7)', letterSpacing:1 }}>pts</div>}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── 5. 런 기록 — 직전 런 + 이전 드롭다운 ────────────────────────
+const RunHistoryWidget = ({ runLog, playState }) => {
+  const [open, setOpen] = useState(false);
+  if (runLog.length === 0) return null;
+
+  const sorted  = [...runLog].reverse(); // 최신 순
+  const latest  = sorted[0];
+  const older   = sorted.slice(1);
+
+  const RunRow = ({ run, highlight }) => (
+    <div style={{
+      display:'flex', alignItems:'center', gap:8, padding:'6px 10px', borderRadius:6,
+      background: highlight ? 'rgba(0,200,255,0.06)' : 'rgba(255,255,255,0.02)',
+      border:`1px solid ${highlight ? 'rgba(0,200,255,0.2)' : 'rgba(255,255,255,0.05)'}`,
+    }}>
+      <span style={{ fontFamily:'monospace', fontSize:10, color:'rgba(255,255,255,0.6)', flexShrink:0 }}>
+        #{run.runIdx}
+      </span>
+      <div style={{ display:'flex', gap:3, alignItems:'center', flex:1, flexWrap:'wrap' }}>
+        {run.inputs.map((inp, j) => (
+          <React.Fragment key={j}>
+            {j > 0 && <span style={{ color:'rgba(255,255,255,0.45)', fontSize:10 }}>›</span>}
+            <Keycap k={inp.key} size={22} />
+          </React.Fragment>
+        ))}
+      </div>
+      <span style={{ fontFamily:'monospace', fontSize:11, color:'#ffe566', flexShrink:0,
+        textShadow:'0 0 8px rgba(255,220,60,0.4)' }}>
+        {run.score}pts
+      </span>
+    </div>
+  );
+
+  return (
+    <div style={{ padding:'4px 14px 10px' }}>
+      {/* 직전 런 */}
+      <div style={{ fontFamily:'monospace', fontSize:11, fontWeight:700, letterSpacing:1, color:'rgba(0,200,255,0.75)', marginBottom:6 }}>
+        직전 런
+      </div>
+      <RunRow run={latest} highlight />
+
+      {/* 이전 런 드롭다운 */}
+      {older.length > 0 && (
+        <div style={{ marginTop:6 }}>
+          <div onClick={() => setOpen(v => !v)} style={{
+            display:'flex', alignItems:'center', gap:6, cursor:'pointer', padding:'4px 0',
+          }}>
+            <span style={{ fontFamily:'monospace', fontSize:11, color:'rgba(0,200,255,0.75)' }}>
+              {open ? '▲' : '▼'} 이전 기록 ({older.length}개)
+            </span>
+          </div>
+          {open && (
+            <div style={{ display:'flex', flexDirection:'column', gap:4, marginTop:4 }}>
+              {older.map(run => <RunRow key={run.runIdx} run={run} />)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── 6. 녹화 테이크 로그 ──────────────────────────────────────────
+const RecordLogWidget = ({ takes, recordState, onSelectTake, onDeleteTake, selectedTakeId, onDownload, downloadState }) => {
+  if (takes.length === 0 && recordState === 'idle') return (
+    <div style={{ padding:'14px', fontFamily:'monospace', fontSize:11, color:'rgba(255,255,255,0.3)', textAlign:'center' }}>
+      F11로 녹화 시작
+    </div>
+  );
+
+  const REC_COLOR = '#ff3366';
+  const fmt = ms => `${(ms / 1000).toFixed(1)}s`;
+
+  return (
+    <div style={{ padding:'8px 12px 12px' }}>
+      {/* 현재 녹화 중 표시 */}
+      {recordState === 'recording' && (
+        <div style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 10px', marginBottom:8,
+          borderRadius:6, background:'rgba(255,30,60,0.1)', border:'1px solid rgba(255,30,60,0.4)',
+          animation:'pulse 1s infinite' }}>
+          <span style={{ width:8, height:8, borderRadius:'50%', background:REC_COLOR, flexShrink:0,
+            boxShadow:`0 0 8px ${REC_COLOR}` }} />
+          <span style={{ fontFamily:'monospace', fontSize:12, fontWeight:700, color:REC_COLOR,
+            letterSpacing:1 }}>REC</span>
+          <span style={{ fontFamily:'monospace', fontSize:11, color:'rgba(255,255,255,0.5)', flex:1 }}>
+            F11 정지  /  ESC 취소
+          </span>
+        </div>
+      )}
+
+      {/* 테이크 목록 */}
+      {takes.length > 0 && (
+        <div style={{ marginBottom:8 }}>
+          <div style={{ fontFamily:'monospace', fontSize:10, letterSpacing:1.5, fontWeight:700,
+            color:'rgba(255,255,255,0.5)', marginBottom:6 }}>테이크</div>
+          <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
+            {[...takes].reverse().map(tk => {
+              const sel = tk.id === selectedTakeId;
+              return (
+                <div key={tk.id} onClick={() => onSelectTake(tk.id)}
+                  style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 8px', cursor:'pointer',
+                    borderRadius:6, border:`1px solid ${sel ? 'rgba(0,200,255,0.5)' : 'rgba(255,255,255,0.07)'}`,
+                    background: sel ? 'rgba(0,200,255,0.08)' : 'rgba(255,255,255,0.02)',
+                    transition:'all 0.12s' }}>
+                  <span style={{ fontFamily:'monospace', fontSize:10, color:'rgba(255,255,255,0.4)', flexShrink:0 }}>
+                    #{tk.idx}
+                  </span>
+                  <span style={{ fontFamily:'monospace', fontSize:11, fontWeight:700,
+                    color: sel ? '#00d4ff' : 'rgba(255,255,255,0.7)', flex:1 }}>
+                    {fmt(tk.durationMs)}
+                  </span>
+                  <span style={{ fontFamily:'monospace', fontSize:10, color:'rgba(255,255,255,0.45)' }}>
+                    {tk.inputs.length}입력
+                  </span>
+                  <div onPointerDown={e => e.stopPropagation()}
+                    onClick={e => { e.stopPropagation(); onDeleteTake(tk.id); }}
+                    style={{ cursor:'pointer', fontSize:13, color:'rgba(255,80,100,0.6)',
+                      padding:'0 4px', lineHeight:1, userSelect:'none' }}>×</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 선택된 테이크 → 다운로드 */}
+      {selectedTakeId && (
+        <div style={{ borderTop:'1px solid rgba(255,255,255,0.07)', paddingTop:8 }}>
+          {downloadState ? (
+            <div style={{ fontFamily:'monospace', fontSize:11, color:'rgba(0,200,255,0.8)', lineHeight:1.7 }}>
+              {downloadState}
+            </div>
+          ) : (
+            <div onPointerDown={e => e.stopPropagation()}
+              onClick={onDownload}
+              style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:8,
+                padding:'8px', borderRadius:6, cursor:'pointer', userSelect:'none',
+                background:'linear-gradient(135deg,rgba(0,100,255,0.25),rgba(0,200,255,0.15))',
+                border:'1px solid rgba(0,200,255,0.5)',
+                color:'#00d4ff', fontFamily:'monospace', fontSize:12, fontWeight:700,
+                boxShadow:'0 0 12px rgba(0,200,255,0.2)' }}>
+              ↓ 파일 저장 + 웹 업로드
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── 5. 키 바인딩 — 3열: [스킬 아이콘] [슬롯/스킬명] [내 바인딩] ─
+const BindingsWidget = ({ bindings, onChange, champData, patch }) => {
+  const [listening, setListening] = useState(null);
+
+  useEffect(() => {
+    if (!listening) return;
+    const h = e => {
+      e.preventDefault(); e.stopPropagation();
+      const k = e.key === 'Escape' ? null : e.key.length === 1 ? e.key.toUpperCase() : null;
+      if (k !== null) onChange({ ...bindings, [listening]: k });
+      setListening(null);
+    };
+    window.addEventListener('keydown', h, true);
+    return () => window.removeEventListener('keydown', h, true);
+  }, [listening, bindings, onChange]);
+
+  const spells = champData?.spells || [];
+
+  const rows = [
+    ...['Q','W','E','R'].map((slot, i) => ({
+      slot, group:'스킬',
+      name: spells[i]?.name || slot,
+      iconUrl: spells[i] && patch ? ddUrl(patch, 'spell', spells[i].image.full) : null,
+      isClick: false,
+    })),
+    { slot:'D', group:'소환사', name:'소환사 주문 D', iconUrl:null, isClick:false },
+    { slot:'F', group:'소환사', name:'소환사 주문 F', iconUrl:null, isClick:false },
+    { slot:'AA', group:'기타', name:'평타', iconUrl:null, isClick:true },
+  ];
+
+  let lastGroup = null;
+  return (
+    <div style={{ padding:'4px 0 6px' }}>
+      {rows.map(row => {
+        const isL = listening === row.slot;
+        const groupHeader = row.group !== lastGroup
+          ? <div key={'g'+row.group} style={{ fontFamily:'monospace', fontSize:10, letterSpacing:1.5, textTransform:'uppercase', color:'rgba(255,255,255,0.6)', padding:'6px 12px 2px', fontWeight:600 }}>{row.group}</div>
+          : null;
+        lastGroup = row.group;
+        return (
+          <React.Fragment key={row.slot}>
+            {groupHeader}
+            <div style={{ display:'flex', alignItems:'center', gap:8, padding:'5px 12px', background:isL?'rgba(200,168,74,0.08)':'transparent' }}>
+              {/* Col 1: 스킬 아이콘 */}
+              <div style={{ width:24, height:24, borderRadius:3, overflow:'hidden', background:'rgba(255,255,255,0.06)', flexShrink:0, display:'flex', alignItems:'center', justifyContent:'center' }}>
+                {row.iconUrl
+                  ? <img src={row.iconUrl} width={24} height={24} style={{display:'block'}} onError={e=>e.currentTarget.style.display='none'} />
+                  : <span style={{fontFamily:'monospace', fontSize:10, color:'rgba(255,255,255,0.3)', fontWeight:700}}>{row.slot==='AA'?'AA':row.slot}</span>
+                }
+              </div>
+              {/* Col 2: 기본 슬롯 + 스킬명 */}
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:13, color:'rgba(255,255,255,0.88)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                  {row.name}
+                </div>
+                {row.isClick && (
+                  <div style={{ fontSize:10, fontFamily:'monospace', color:'rgba(255,255,255,0.32)', marginTop:2 }}>
+                    마우스 클릭 자동감지
+                  </div>
+                )}
+              </div>
+              {/* Col 3: 내 바인딩 */}
+              {row.isClick
+                ? <span style={{ fontFamily:'monospace', fontSize:12, color:'rgba(200,184,128,0.5)', flexShrink:0 }}>클릭</span>
+                : (
+                  <div onClick={() => setListening(row.slot)} style={{ cursor:'pointer', flexShrink:0 }}>
+                    {isL
+                      ? <span style={{ fontFamily:'monospace', fontSize:10, color:'#c8a84a', animation:'pulse 1s infinite' }}>입력…</span>
+                      : <Keycap k={bindings[row.slot]||row.slot} size={26} />
+                    }
+                  </div>
+                )
+              }
+            </div>
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+};
+
+// ── 6. 컨트롤 패널 ──────────────────────────────────────────────
+const Toggle = ({ on, onClick, label, hotkey }) => (
+  <div onClick={onClick} style={{ display:'flex', alignItems:'center', gap:10, padding:'6px 14px', cursor:'pointer',
+    background: on ? 'rgba(0,200,255,0.04)' : 'transparent',
+    borderLeft: on ? '2px solid rgba(0,200,255,0.4)' : '2px solid transparent',
+    transition:'all 0.15s' }}>
+    <div style={{ width:30, height:15, borderRadius:999, position:'relative',
+      background: on ? 'linear-gradient(90deg,#0066ff,#00d4ff)' : 'rgba(255,255,255,0.1)',
+      boxShadow: on ? '0 0 10px rgba(0,200,255,0.5)' : 'none',
+      transition:'all 0.2s', flexShrink:0,
+      border:`1px solid ${on ? 'rgba(0,200,255,0.5)' : 'rgba(255,255,255,0.1)'}` }}>
+      <div style={{ position:'absolute', top:1.5, left:on?16:1.5, width:10, height:10, borderRadius:'50%',
+        background:'#fff', boxShadow: on ? '0 0 6px rgba(0,200,255,0.8)' : 'none', transition:'left 0.2s' }} />
+    </div>
+    <span style={{ flex:1, fontSize:13, color:on?'rgba(200,240,255,0.95)':'rgba(255,255,255,0.45)',
+      textShadow: on ? '0 0 8px rgba(0,200,255,0.4)' : 'none' }}>{label}</span>
+    {hotkey && <span style={{ fontFamily:'monospace', fontSize:9, color:'rgba(0,200,255,0.4)',
+      textShadow:'0 0 6px rgba(0,200,255,0.3)' }}>{hotkey}</span>}
+  </div>
+);
+
+const LOOP_OPTS = [
+  { id:'once', label:'1회' },
+  { id:'3x',   label:'3회' },
+  { id:'5x',   label:'5회' },
+  { id:'inf',  label:'무한' },
+];
+
+const ControlWidget = ({ show, onToggle, playState, onPlayToggle, loopMode, onLoopChange, widgetScale, onScaleChange, showDebug, onToggleDebug, recordState, onRecordToggle, onRecordCancel }) => {
+  const [expanded, setExpanded] = useState(true);
+  return (
+    <div>
+      {/* 드래그 핸들 + 접기 토글 */}
+      <div className="wh" style={{
+        display:'flex', alignItems:'center', gap:8, padding:'8px 12px 7px',
+        borderBottom: expanded ? '1px solid rgba(0,190,255,0.1)' : 'none',
+        background:'linear-gradient(90deg,rgba(0,20,50,0.5),rgba(20,0,50,0.3))',
+        cursor:'grab', userSelect:'none',
+      }}>
+        <span style={{ width:6, height:6, borderRadius:'50%', background:'#00d4ff',
+          boxShadow:'0 0 8px #00d4ff, 0 0 16px rgba(0,212,255,0.5)', flexShrink:0 }} />
+        <span style={{ fontFamily:'monospace', fontSize:13, letterSpacing:2, textTransform:'uppercase',
+          color:'rgba(180,230,255,0.95)', fontWeight:700, textShadow:'0 0 10px rgba(0,200,255,0.6)', flex:1 }}>
+          오버레이 제어
+        </span>
+        {/* 접기/펼치기 버튼 — stopPropagation으로 드래그 방지 */}
+        <div
+          onPointerDown={e => e.stopPropagation()}
+          onClick={() => setExpanded(v => !v)}
+          style={{ cursor:'pointer', padding:'2px 6px', borderRadius:4,
+            background:'rgba(0,200,255,0.08)', border:'1px solid rgba(0,200,255,0.2)',
+            fontFamily:'monospace', fontSize:11, color:'rgba(0,200,255,0.7)',
+            lineHeight:1.4, userSelect:'none' }}>
+          {expanded ? '▲' : '▼'}
+        </div>
+      </div>
+
+      {expanded && (
+        <div style={{ padding:'4px 0 8px' }}>
+          <Toggle on={show.champion}   onClick={()=>onToggle('champion')}  label="챔피언+콤보" hotkey="F1" />
+          <Toggle on={show.sequence}   onClick={()=>onToggle('sequence')}  label="연습+기록"   hotkey="F3" />
+          <Toggle on={show.bindings}   onClick={()=>onToggle('bindings')}  label="키 바인딩"   hotkey="F5" />
+          <Toggle on={show.video}      onClick={()=>onToggle('video')}     label="참고 영상"   hotkey="F7" />
+          <Toggle on={show.recordLog}  onClick={()=>onToggle('recordLog')} label="녹화 로그"   hotkey="" />
+          <Toggle on={showDebug}       onClick={onToggleDebug}             label="디버그"      hotkey="F8" />
+          <div style={{ height:1, background:'linear-gradient(90deg,transparent,rgba(255,30,60,0.3),transparent)', margin:'4px 14px' }} />
+          {/* 녹화 버튼 */}
+          <div onPointerDown={e=>e.stopPropagation()} onClick={onRecordToggle} style={{
+            display:'flex', alignItems:'center', gap:10, padding:'7px 14px', cursor:'pointer',
+            background: recordState==='recording' ? 'rgba(255,30,60,0.08)' : 'rgba(255,255,255,0.02)',
+            borderLeft: recordState==='recording' ? '2px solid rgba(255,30,60,0.7)' : '2px solid rgba(255,80,100,0.3)',
+            transition:'all 0.2s',
+          }}>
+            <div style={{ width:14, height:14, borderRadius:'50%', flexShrink:0,
+              background: recordState==='recording' ? '#ff3366' : 'rgba(255,80,100,0.4)',
+              boxShadow: recordState==='recording' ? '0 0 10px rgba(255,30,60,0.8)' : 'none',
+              animation: recordState==='recording' ? 'pulse 1s infinite' : 'none' }} />
+            <span style={{ flex:1, fontSize:13,
+              color: recordState==='recording' ? '#ff7090' : 'rgba(255,150,165,0.6)' }}>
+              {recordState==='recording' ? '■ 녹화 정지' : '● 녹화 시작'}
+            </span>
+            <span style={{ fontFamily:'monospace', fontSize:10, color:'rgba(255,80,100,0.5)' }}>F11</span>
+          </div>
+          {recordState==='recording' && (
+            <div onPointerDown={e=>e.stopPropagation()} onClick={onRecordCancel} style={{
+              display:'flex', alignItems:'center', justifyContent:'center', padding:'4px 14px 6px',
+              cursor:'pointer', fontFamily:'monospace', fontSize:11, color:'rgba(255,80,100,0.6)',
+              userSelect:'none',
+            }}>
+              ESC — 취소
+            </div>
+          )}
+          <div style={{ height:1, background:'linear-gradient(90deg,transparent,rgba(0,200,255,0.2),transparent)', margin:'6px 14px' }} />
+
+          {/* 루프 모드 */}
+          <div style={{ padding:'2px 14px 6px' }}>
+            <div style={{ fontFamily:'monospace', fontSize:11, letterSpacing:1.5, fontWeight:600, color:'rgba(255,255,255,0.6)', marginBottom:6 }}>LOOP</div>
+            <div style={{ display:'flex', gap:4 }}>
+              {LOOP_OPTS.map(opt => {
+                const active = loopMode === opt.id;
+                return (
+                  <div key={opt.id} onClick={() => onLoopChange(opt.id)} style={{
+                    flex:1, textAlign:'center', padding:'5px 0',
+                    borderRadius:5, cursor:'pointer', fontFamily:'monospace',
+                    fontSize: 11,
+                    background: active ? 'linear-gradient(135deg,rgba(0,100,255,0.3),rgba(0,200,255,0.15))' : 'rgba(255,255,255,0.04)',
+                    border: `1px solid ${active ? 'rgba(0,200,255,0.6)' : 'rgba(255,255,255,0.06)'}`,
+                    color: active ? '#00d4ff' : 'rgba(255,255,255,0.35)',
+                    boxShadow: active ? '0 0 10px rgba(0,200,255,0.3), inset 0 0 8px rgba(0,100,255,0.1)' : 'none',
+                    textShadow: active ? '0 0 8px rgba(0,200,255,0.8)' : 'none',
+                    transition:'all 0.15s',
+                  }}>
+                    {opt.label}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 크기 조절 */}
+          <div style={{ padding:'2px 14px 6px' }}>
+            <div style={{ fontFamily:'monospace', fontSize:11, letterSpacing:1.5, fontWeight:600, color:'rgba(255,255,255,0.6)', marginBottom:6 }}>크기</div>
+            <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+              <div onPointerDown={e=>e.stopPropagation()} onClick={() => onScaleChange(Math.max(0.5, Math.round((widgetScale-0.1)*10)/10))}
+                style={{ cursor:'pointer', width:28, height:28, borderRadius:6, flexShrink:0,
+                  display:'flex', alignItems:'center', justifyContent:'center',
+                  background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.12)',
+                  fontSize:18, color:'rgba(255,255,255,0.65)', fontWeight:700, userSelect:'none' }}>−</div>
+              <div style={{ flex:1, textAlign:'center', fontFamily:'monospace', fontSize:13,
+                color:'rgba(0,200,255,0.85)', fontWeight:700, letterSpacing:1 }}>
+                {Math.round(widgetScale*100)}%
+              </div>
+              <div onPointerDown={e=>e.stopPropagation()} onClick={() => onScaleChange(Math.min(1.3, Math.round((widgetScale+0.1)*10)/10))}
+                style={{ cursor:'pointer', width:28, height:28, borderRadius:6, flexShrink:0,
+                  display:'flex', alignItems:'center', justifyContent:'center',
+                  background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.12)',
+                  fontSize:18, color:'rgba(255,255,255,0.65)', fontWeight:700, userSelect:'none' }}>+</div>
+            </div>
+          </div>
+
+          <div style={{ height:1, background:'linear-gradient(90deg,transparent,rgba(0,200,255,0.2),transparent)', margin:'4px 14px' }} />
+          <div onClick={onPlayToggle} style={{
+            display:'flex', alignItems:'center', gap:10, padding:'7px 14px', cursor:'pointer',
+            background: playState!=='idle' ? 'rgba(0,255,100,0.05)' : 'rgba(255,255,255,0.02)',
+            borderLeft: playState!=='idle' ? '2px solid rgba(0,255,100,0.5)' : '2px solid rgba(0,200,255,0.2)',
+            margin:'0 0 4px 0', transition:'all 0.2s',
+          }}>
+            <div style={{ width:30, height:15, borderRadius:999, position:'relative', flexShrink:0,
+              background: playState!=='idle'
+                ? 'linear-gradient(90deg,#00cc44,#00ff88)'
+                : 'linear-gradient(90deg,#0066ff,#00d4ff)',
+              boxShadow: playState!=='idle' ? '0 0 12px rgba(0,255,100,0.6)' : '0 0 8px rgba(0,200,255,0.4)',
+              border:`1px solid ${playState!=='idle' ? 'rgba(0,255,100,0.5)' : 'rgba(0,200,255,0.4)'}` }}>
+              <div style={{ position:'absolute', top:1.5, left:playState!=='idle'?16:1.5, width:10, height:10, borderRadius:'50%',
+                background:'#fff', boxShadow:'0 0 6px rgba(255,255,255,0.8)', transition:'left 0.2s' }} />
+            </div>
+            <span style={{ flex:1, fontSize:13,
+              color: playState!=='idle' ? 'rgba(180,255,200,0.95)' : 'rgba(180,220,255,0.6)',
+              textShadow: playState!=='idle' ? '0 0 8px rgba(0,255,100,0.5)' : '0 0 6px rgba(0,200,255,0.3)' }}>
+              {playState==='countdown'?'카운트다운...':playState==='playing'?'● 연습 중':'연습 시작 (F9)'}
+            </span>
+            <span style={{ fontFamily:'monospace', fontSize:10, color:'rgba(0,200,255,0.5)',
+              textShadow:'0 0 6px rgba(0,200,255,0.4)' }}>F9</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── 7. 참고 영상 위젯 ────────────────────────────────────────────
+const VideoWidget = ({ videoUrl, visible, defaultPos, scale }) => {
+  const videoRef = useRef(null);
+  if (!videoUrl) return null;
+  return (
+    <Widget defaultPos={defaultPos || { x:1380, y:20 }} width={400} visible={visible} scale={scale}>
+      <WHeader title="참고 영상" sub="독립 재생" right={
+        <div
+          onClick={e => { e.stopPropagation(); const v = videoRef.current; if (v) v.paused ? v.play() : v.pause(); }}
+          onPointerDown={e => e.stopPropagation()}
+          style={{ cursor:'pointer', fontFamily:'monospace', fontSize:10, color:'rgba(0,200,255,0.7)',
+            padding:'2px 7px', borderRadius:4, background:'rgba(0,200,255,0.08)',
+            border:'1px solid rgba(0,200,255,0.2)', userSelect:'none' }}>
+          ▶/⏸
+        </div>
+      } />
+      <video
+        ref={videoRef}
+        src={videoUrl}
+        controls
+        loop
+        playsInline
+        style={{
+          width:'100%', display:'block',
+          background:'#000',
+          borderRadius:'0 0 10px 10px',
+          maxHeight:300, objectFit:'contain',
+        }}
+      />
+    </Widget>
+  );
+};
+
+// ── 메인 앱 ─────────────────────────────────────────────────────
+const App = () => {
+  const [champion, setChampion] = useState(null);
+  const [patch, setPatch] = useState(null);
+  const [champData, setChampData] = useState(null);
+  const [combos, setCombos] = useState(IS_OW ? [] : MOCK_COMBOS); // OW에서는 API 결과만
+  const [playerStats, setPlayerStats] = useState(null); // null = 데이터 없음
+  const [activeId, setActiveId] = useState(IS_OW ? null : MOCK_COMBOS[0]?.id);
+  const [comboDetail, setComboDetail] = useState(null); // { videoUrl, game_specific }
+  const [show, setShow] = useState({ champion:true, sequence:true, bindings:false, video:true, recordLog:false });
+  const [bindings, setBindings] = useState({ Q:'Q',W:'W',E:'E',R:'R',D:'D',F:'F' });
+
+  const [loopMode, setLoopMode] = useState('5x'); // 'once'|'3x'|'5x'|'inf'
+  const [runLog, setRunLog] = useState([]);
+  const [playState, setPlayState] = useState('idle');
+  const [countNum, setCountNum] = useState(3);
+  const [playMs, setPlayMs] = useState(0);
+  const [liveInputs, setLiveInputs] = useState([]);
+  const [matched, setMatched] = useState(new Set());
+  const [score, setScore] = useState(0);
+  const [lastQuality, setLastQuality] = useState(null);
+  const [showDebug, setShowDebug] = useState(IS_OW); // Overwolf에서는 기본 표시
+  const [widgetScale, setWidgetScale] = useState(0.80); // 전체 위젯 스케일
+  const [debugLog, setDebugLog] = useState([]);
+
+  // ── 녹화 state ────────────────────────────────────────────────
+  const [recordState, setRecordState] = useState('idle'); // 'idle' | 'recording'
+  const [recordTakes, setRecordTakes] = useState([]);
+  const [selectedTakeId, setSelectedTakeId] = useState(null);
+  const [downloadState, setDownloadState] = useState(null); // null | 문자열
+  const recordStartRef = useRef(null);
+  const recordInputsRef = useRef([]);
+  const recordIdxRef = useRef(0);
+  const addDebug = useCallback((msg) => {
+    window._dbgPush(msg);
+  }, []);
+
+  // 전역 debug 콜백 연결 — fetchCombos 등 React 밖 코드도 패널에 반영됨
+  useEffect(() => {
+    window._dbgCallback = (lines) => setDebugLog([...lines]);
+    return () => { window._dbgCallback = null; };
+  }, []);
+
+  const playRef        = useRef({ startTime:null, speed:1, playMs:0 });
+  const rafRef         = useRef(null);
+  const qualTimer      = useRef(null);
+  const inputHandlerRef = useRef(null);
+  const togglePlayRef   = useRef(null);
+  const matchedRef      = useRef(new Set());
+  const activeComboRef  = useRef(null);
+  const bindingsRef     = useRef(bindings);
+  const playStateRef    = useRef('idle');
+  const loopModeRef     = useRef('once');
+  const runCountRef     = useRef(0);
+  const curRunInputsRef = useRef([]);
+  const scoreRef        = useRef(0);
+  const lastDetectedChampRef = useRef(null);
+  const recordStateRef   = useRef('idle');
+  const startRecordRef   = useRef(null);
+  const stopRecordRef    = useRef(null);
+  const cancelRecordRef  = useRef(null);
+  const masterKeyRef     = useRef(null);
+
+  const activeCombo = combos.find(c => c.id === activeId) || combos[0];
+  const TOTAL = activeCombo?.duration_ms || 10000;
+
+  // refs 동기화
+  useEffect(() => { bindingsRef.current = bindings; }, [bindings]);
+  useEffect(() => { playStateRef.current = playState; }, [playState]);
+  useEffect(() => { matchedRef.current = matched; }, [matched]);
+  useEffect(() => { activeComboRef.current = activeCombo; }, [activeCombo]);
+  useEffect(() => { loopModeRef.current = loopMode; }, [loopMode]);
+  useEffect(() => { scoreRef.current = score; }, [score]);
+
+  // 콤보 선택 시 상세 API 호출 → videoUrl + game_specific
+  // list API에는 두 필드가 없어서 선택할 때마다 상세를 한 번 더 가져옴
+  useEffect(() => {
+    if (!activeId) return;
+    setComboDetail(null);
+    fetch(`https://combogg-web.vercel.app/api/combos/${activeId}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d) return;
+        setComboDetail({
+          videoUrl: d.videoUrl || null,
+          game_specific: d.game_specific || d.gameSpecific || null,
+        });
+      })
+      .catch(() => setComboDetail(null));
+  }, [activeId]);
+
+  // 챔피언 적용 헬퍼
+  const applyChampion = useCallback(async (name) => {
+    if (!name || name === lastDetectedChampRef.current) return;
+    lastDetectedChampRef.current = name;
+    addDebug(`[champion] 적용: ${name}`);
+    const c = { name, id: name.toLowerCase().replace(/\s+/g,'').replace(/[^a-z]/g,'') };
+    setChampion(c);
+    const [combosRes, champRes] = await Promise.all([
+      fetchCombos(c.id),
+      fetchChampionData(c.name),
+    ]);
+    if (combosRes.length) {
+      setCombos(combosRes);
+      setActiveId(combosRes[0].id);
+    } else {
+      setCombos([]);
+      setActiveId(null);
+      addDebug(`[combos] 0개 — 웹에 등록된 콤보 없음 (published 상태 확인)`);
+    }
+    if (champRes) { setPatch(champRes.patch); setChampData(champRes.champ); }
+  }, []);
+
+  // OW: 오버레이 창을 게임 해상도에 맞게 자동 조정
+  useEffect(() => {
+    if (!IS_OW) return;
+    overwolf.windows.getCurrentWindow(res => {
+      if (!res.success) return;
+      const wid = res.window.id;
+      overwolf.games.getRunningGameInfo(info => {
+        if (!info) return;
+        const w = info.logicalWidth  || info.width  || 1920;
+        const h = info.logicalHeight || info.height || 1080;
+        overwolf.windows.changeSize({ window_id: wid, width: w, height: h, auto_dpi_resize: false }, () => {});
+        overwolf.windows.changePosition(wid, 0, 0, () => {});
+      });
+    });
+  }, []);
+
+  // OW 클릭 차단: widget 영역 밖은 InputPassThrough (게임으로 클릭 통과)
+  useEffect(() => {
+    if (!IS_OW) return;
+    let wid = null;
+    let currentPassThrough = false;
+
+    const applyStyle = (passThrough) => {
+      if (!wid || currentPassThrough === passThrough) return;
+      currentPassThrough = passThrough;
+      overwolf.windows.setWindowStyle(
+        wid,
+        passThrough
+          ? overwolf.windows.enums.WindowStyle.InputPassThrough
+          : overwolf.windows.enums.WindowStyle.None,
+        () => {}
+      );
+    };
+
+    overwolf.windows.getCurrentWindow(res => {
+      if (!res.success) return;
+      wid = res.window.id;
+      applyStyle(true); // 기본값: 게임으로 통과
+
+      overwolf.games.inputTracking.onMousePositionChanged.addListener(evt => {
+        // evt.x/y는 화면 좌표 — 윈도우가 (0,0)에 위치하므로 뷰포트 좌표와 일치
+        const els = document.elementsFromPoint(evt.x, evt.y);
+        const overWidget = els.some(el => el.closest('[data-widget]'));
+        applyStyle(!overWidget);
+      });
+    });
+  }, []);
+
+  // OW GEP features 등록 — "provider did not set features yet" 대비 재시도
+  useEffect(() => {
+    if (!IS_OW) return;
+    let attempt = 0;
+    let getInfoPollId = null;
+
+    const pollGetInfo = () => {
+      overwolf.games.events.getInfo(res => {
+        const champ = res?.res?.summoner_info?.champion
+                   || res?.res?.me?.champion
+                   || res?.res?.champion?.name
+                   || res?.res?.game_info?.champion;
+        if (champ) {
+          addDebug(`[GEP] 챔피언 확인: ${champ}`);
+          clearInterval(getInfoPollId);
+          applyChampion(champ);
+        }
+      });
+    };
+
+    const tryRegister = () => {
+      overwolf.games.events.setRequiredFeatures(
+        ['me', 'champion', 'game_info', 'summoner_info', 'live_client_data'],
+        s => {
+          if (s.success) {
+            addDebug(`[GEP] 등록 완료 (${attempt}차 시도)`);
+            // 즉시 한 번 + 챔피언 나올 때까지 3초마다 최대 60초
+            pollGetInfo();
+            getInfoPollId = setInterval(pollGetInfo, 3000);
+            setTimeout(() => { clearInterval(getInfoPollId); addDebug('[GEP] getInfo 폴링 종료'); }, 60000);
+          } else if (attempt < 15) {
+            attempt++;
+            addDebug(`[GEP] 대기 중… ${attempt}차 재시도`);
+            setTimeout(tryRegister, 2000);
+          } else {
+            addDebug(`[GEP] 등록 포기 — Riot Local API로 대체`);
+          }
+        }
+      );
+    };
+    tryRegister();
+    return () => { clearInterval(getInfoPollId); };
+  }, []);
+
+  // OW 게임 이벤트로 챔피언 감지 (인게임)
+  useEffect(() => {
+    OW.onChampion(c => applyChampion(c.name));
+  }, []);
+
+  // 챔피언 선택 화면: background.html이 보내는 numeric championId → 이름으로 변환 후 적용
+  // Data Dragon champion.json에서 key(숫자) → id(영문명) 매핑
+  useEffect(() => {
+    if (!IS_OW) return;
+    let champMap = null; // { "64": "LeeSin", ... }
+
+    const resolveAndApply = async (champId) => {
+      if (!champId) return;
+      addDebug(`[champId] 수신: ${champId}`);
+      try {
+        if (!champMap) {
+          const versions = await fetch('https://ddragon.leagueoflegends.com/api/versions.json').then(r => r.json());
+          const patch = versions[0];
+          const data = await fetch(`https://ddragon.leagueoflegends.com/cdn/${patch}/data/en_US/champion.json`).then(r => r.json());
+          champMap = {};
+          Object.values(data.data).forEach(c => { champMap[String(c.key)] = c.id; });
+        }
+        const name = champMap[String(champId)];
+        addDebug(`[champId] 매핑: ${champId} → ${name || '?'}`);
+        if (name) applyChampion(name);
+      } catch(e) {
+        addDebug(`[champId] 에러: ${e?.message || e}`);
+      }
+    };
+
+    OW.onChampId(id => resolveAndApply(id));
+  }, []);
+
+  // Riot 로컬 API 폴링 (훈련모드 포함)
+  // 초반 30초는 2초마다, 이후 5초마다 (훈련모드 시작 직후 API가 늦게 뜸)
+  useEffect(() => {
+    const makeSignal = (ms) => {
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), ms);
+      return ctrl.signal;
+    };
+    let pollCount = 0;
+
+    const poll = async () => {
+      pollCount++;
+      try {
+        const [pr, ir] = await Promise.allSettled([
+          fetch('https://127.0.0.1:2999/liveclientdata/activeplayer', { signal: makeSignal(5000) }),
+          fetch('https://127.0.0.1:2999/liveclientdata/activeplayeritems', { signal: makeSignal(5000) }),
+        ]);
+
+        let nextStats = {};
+        if (pr.status === 'fulfilled' && pr.value.ok) {
+          const pd = await pr.value.json();
+          if (pd.championName) {
+            addDebug(`[RiotAPI] 챔피언: ${pd.championName}`);
+            applyChampion(pd.championName);
+          }
+          const cdr = pd.championStats?.cooldownReduction ?? 0;
+          nextStats.level       = pd.level ?? null;
+          nextStats.attackSpeed = pd.championStats?.attackSpeed ?? null;
+          nextStats.abilityHaste = cdr > 0 ? Math.round(cdr / (1 - cdr) * 100) : 0;
+        } else {
+          const reason = pr.status === 'rejected'
+            ? (pr.reason?.name === 'AbortError' ? '타임아웃(API 시작 대기)' : pr.reason?.message || 'ERR')
+            : `HTTP ${pr.value?.status}`;
+          if (pollCount <= 3 || pollCount % 5 === 0) addDebug(`[RiotAPI] ${reason}`);
+        }
+        if (ir.status === 'fulfilled' && ir.value.ok) {
+          const items = await ir.value.json();
+          nextStats.items = items.map(it => String(it.itemID));
+        }
+        if (Object.keys(nextStats).length) {
+          setPlayerStats(prev => ({ ...(prev||{}), ...nextStats }));
+        }
+      } catch(err) {
+        if (pollCount <= 3) addDebug(`[poll] ${err?.message || err}`);
+      }
+    };
+
+    // 즉시 + 초반 15회는 2초마다, 이후 5초마다
+    poll();
+    let id = setInterval(() => {
+      poll();
+      if (pollCount === 15) {
+        clearInterval(id);
+        id = setInterval(poll, 5000);
+      }
+    }, 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  // 입력 핸들러 ref 업데이트
+  useEffect(() => {
+    inputHandlerRef.current = ({ key, t }) => {
+      const bnd = bindingsRef.current;
+      const mapped = Object.entries(bnd).find(([,v]) => v === key)?.[0] || key;
+      if (playStateRef.current === 'playing') {
+        const ms = playRef.current.playMs || 0;
+        curRunInputsRef.current.push({ key: mapped, t: ms, id: t + Math.random() });
+        setLiveInputs(prev => [...prev, { key: mapped, t: ms, id: t + Math.random() }]);
+        scoreInput(mapped, ms);
+      }
+    };
+  }, []);
+
+  useEffect(() => { recordStateRef.current = recordState; }, [recordState]);
+
+  // 중앙 키 디스패처 — 매 렌더마다 갱신해 항상 최신 state/ref 참조
+  // OW.onKeyDown(inputTracking)을 경유하므로 인게임 F8/F11/ESC 모두 캡처됨
+  useEffect(() => {
+    masterKeyRef.current = ({ key, t }) => {
+      if (key === 'F8') {
+        window._dbgPush('[KEY] F8 → 디버그 토글');
+        setShowDebug(v => !v);
+        return;
+      }
+      if (key === 'F11') {
+        if (recordStateRef.current === 'recording') {
+          window._dbgPush('[KEY] F11 → 녹화 정지');
+          stopRecordRef.current?.();
+        } else {
+          window._dbgPush('[KEY] F11 → 녹화 시작');
+          startRecordRef.current?.();
+        }
+        return;
+      }
+      if (key === 'ESC' && recordStateRef.current === 'recording') {
+        window._dbgPush('[KEY] ESC → 녹화 취소');
+        cancelRecordRef.current?.();
+        return;
+      }
+      if (key === 'F1') { setShow(p => ({ ...p, champion: !p.champion })); return; }
+      if (key === 'F3') { setShow(p => ({ ...p, sequence: !p.sequence })); return; }
+      if (key === 'F5') { setShow(p => ({ ...p, bindings: !p.bindings })); return; }
+      if (key === 'F7') { setShow(p => ({ ...p, video: !p.video })); return; }
+      // 게임 입력 — 점수 채점
+      inputHandlerRef.current?.({ key, t });
+      // 녹화 중이면 입력도 수집
+      if (recordStateRef.current === 'recording') {
+        const relT = Math.round(t - recordStartRef.current);
+        recordInputsRef.current.push({ key, t: relT });
+      }
+    };
+  });
+
+  // OW 리스너 한 번만 등록 — masterKeyRef를 통해 라우팅
+  useEffect(() => {
+    OW.onKeyDown(e => masterKeyRef.current?.(e));
+    OW.onMouseDown(e => {
+      inputHandlerRef.current?.(e);
+      if (recordStateRef.current === 'recording') {
+        const relT = Math.round(e.t - recordStartRef.current);
+        recordInputsRef.current.push({ key: 'AA', t: relT });
+      }
+    });
+  }, []);
+
+  // 연습 tick
+  useEffect(() => {
+    if (playState !== 'playing') return;
+    const tick = ts => {
+      const ms = (ts - playRef.current.startTime) * playRef.current.speed;
+      playRef.current.playMs = ms;
+      setPlayMs(ms);
+      if (ms >= TOTAL) { onRunComplete(ms); return; }
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    playRef.current.startTime = performance.now();
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [playState, activeId]);
+
+  // togglePlay ref 업데이트
+  useEffect(() => {
+    togglePlayRef.current = () => {
+      if (playStateRef.current === 'idle') startCountdown();
+      else { cancelAnimationFrame(rafRef.current); setPlayState('idle'); }
+    };
+  }, [playState]);
+
+  // ── 녹화 함수 — ref로 직접 정의 (togglePlayRef 패턴, stale closure 없음) ──
+  // no-deps → 매 렌더마다 최신 setState를 캡처, recordStateRef로 상태 확인
+  useEffect(() => {
+    startRecordRef.current = () => {
+      if (recordStateRef.current === 'recording') return;
+      recordStartRef.current = performance.now();
+      recordInputsRef.current = [];
+      setRecordState('recording');
+      setShow(prev => ({ ...prev, recordLog: true }));
+      window._dbgPush('[REC] 녹화 시작');
+    };
+    stopRecordRef.current = () => {
+      if (recordStateRef.current !== 'recording') return;
+      const durationMs = Math.round(performance.now() - recordStartRef.current);
+      const inputs = [...recordInputsRef.current];
+      recordIdxRef.current += 1;
+      const take = { id: crypto.randomUUID(), idx: recordIdxRef.current, inputs, durationMs };
+      setRecordTakes(prev => [...prev, take]);
+      setSelectedTakeId(take.id);
+      setRecordState('idle');
+      setDownloadState(null);
+      window._dbgPush(`[REC] 정지 — ${inputs.length}입력 ${(durationMs/1000).toFixed(1)}s`);
+    };
+    cancelRecordRef.current = () => {
+      if (recordStateRef.current !== 'recording') return;
+      recordInputsRef.current = [];
+      setRecordState('idle');
+      window._dbgPush('[REC] 취소');
+    };
+  }); // no deps
+
+  // 녹화 키 캡처 → masterKeyRef에 통합됨 (OW.onKeyDown 이중 등록 제거)
+
+  const handleDownload = useCallback(() => {
+    const take = recordTakes.find(t => t.id === selectedTakeId);
+    if (!take || !champion) return;
+    const result = window.downloadTutfile({
+      title: `${champion.name} 콤보 #${take.idx}`,
+      difficulty: 'medium',
+      characterId: champion.id,
+      characterName: champion.name,
+      inputs: take.inputs,
+      patch,
+    });
+    if (result.ok) {
+      setDownloadState('저장 완료 — 웹 페이지에서 업로드하세요');
+      setTimeout(() => setDownloadState(null), 4000);
+    } else {
+      setDownloadState(`오류: ${result.error}`);
+      setTimeout(() => setDownloadState(null), 4000);
+    }
+  }, [recordTakes, selectedTakeId, champion, patch]);
+
+  // F9(Overwolf 호키) / \(브라우저 개발) = 연습 토글
+  // F1/F3/F5/F7/F8/F11/ESC → masterKeyRef(OW inputTracking) 경유 — 인게임 동작
+  useEffect(() => {
+    OW.onHotkey('start_practice', () => togglePlayRef.current?.());
+    const h = e => {
+      if (e.key === '\\') { e.preventDefault(); togglePlayRef.current?.(); }
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, []);
+
+  function startCountdown() {
+    resetRun();
+    setCountNum(3);
+    setPlayState('countdown');
+    let n = 3;
+    const iv = setInterval(() => {
+      n--;
+      setCountNum(n);
+      if (n <= 0) { clearInterval(iv); setPlayState('playing'); }
+    }, 1000);
+  }
+
+  function onRunComplete(finalMs) {
+    const log = {
+      runIdx: runCountRef.current + 1,
+      inputs: [...curRunInputsRef.current],
+      score: scoreRef.current,
+      durationMs: Math.round(finalMs),
+    };
+    runCountRef.current += 1;
+    setRunLog(prev => [...prev.slice(-4), log]);
+
+    const mode = loopModeRef.current;
+    const shouldLoop = mode === 'inf'
+      || (mode === '3x' && runCountRef.current < 3)
+      || (mode === '5x' && runCountRef.current < 5);
+
+    if (shouldLoop) {
+      // 짧은 딜레이 후 다음 런 카운트다운
+      setTimeout(() => startCountdown(), 600);
+    } else {
+      setPlayState('idle');
+    }
+  }
+
+  function resetRun() {
+    cancelAnimationFrame(rafRef.current);
+    setPlayMs(0); setScore(0); scoreRef.current = 0;
+    setMatched(new Set()); matchedRef.current = new Set();
+    setLastQuality(null);
+    setLiveInputs([]);
+    curRunInputsRef.current = [];
+    playRef.current = { startTime:null, speed:1, playMs:0 };
+  }
+
+  function resetSession() {
+    resetRun();
+    runCountRef.current = 0;
+    setRunLog([]);
+  }
+
+  function scoreInput(key, ms) {
+    const combo = activeComboRef.current;
+    if (!combo) return;
+    let bestDt = Infinity, bestIdx = null;
+    combo.inputs.forEach((inp, i) => {
+      if (matchedRef.current.has(i) || inp.key !== key) return;
+      const dt = Math.abs(ms - inp.t);
+      if (dt < 900 && dt < bestDt) { bestDt = dt; bestIdx = i; }
+    });
+    const band = bestIdx !== null ? SCORE_BANDS.find(b => bestDt <= b.w) : null;
+    const q = band?.q || 'miss';
+    if (bestIdx !== null) {
+      const next = new Set([...matchedRef.current, bestIdx]);
+      matchedRef.current = next;
+      setMatched(next);
+      setScore(prev => prev + (band?.pts || 0));
+    }
+    setLastQuality(q);
+    clearTimeout(qualTimer.current);
+    qualTimer.current = setTimeout(() => setLastQuality(null), 700);
+  }
+
+  const toggleShow = key => setShow(prev => ({ ...prev, [key]: !prev[key] }));
+
+  // 기본 배치 — 뷰포트 % 기반 (해상도·창 크기 자동 대응)
+  // unscaled 좌표 = visual_px / scale
+  // 챔피언+컨트롤: 시각 x=100 / 시퀀스: 시각 42%vw / 영상: 시각 58%vw
+  // 키바인딩: 시각 x=100, y=45%vh (수직 중앙)
+  const DEFAULT = React.useMemo(() => {
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const u  = v => Math.round(v / widgetScale); // 초기 scale 그대로 사용
+    return {
+      champion:  { x: u(100),       y: u(20) },
+      sequence:  { x: u(vw * 0.32), y: u(20) },
+      bindings:  { x: u(100),       y: u(vh * 0.45) },
+      control:   { x: u(100),       y: u(vh * 0.58) },
+      video:     { x: u(vw * 0.55), y: u(20) },
+      recordLog: { x: u(100),       y: u(vh * 0.28) }, // 챔피언 아래, 컨트롤 위
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return (
+    <div style={{ position:'fixed', inset:0, overflow:'hidden', pointerEvents:'none' }}>
+      {/* 카운트다운 — 스케일 밖에서 뷰포트 중앙 */}
+      {playState === 'countdown' && (
+        <div style={{ position:'fixed', inset:0, display:'flex', alignItems:'center', justifyContent:'center', pointerEvents:'none', zIndex:100 }}>
+          <div style={{
+            fontSize: countNum > 0 ? 200 : 140,
+            fontWeight:900, lineHeight:1,
+            color: countNum > 0 ? '#00d4ff' : '#00ffaa',
+            textShadow: countNum > 0
+              ? '0 0 40px rgba(0,200,255,1), 0 0 100px rgba(0,180,255,0.6)'
+              : '0 0 40px rgba(0,255,170,1), 0 0 100px rgba(0,255,170,0.5)',
+            animation:'popIn 0.25s ease',
+            letterSpacing: countNum > 0 ? -10 : 6,
+          }}>
+            {countNum > 0 ? countNum : 'GO!'}
+          </div>
+        </div>
+      )}
+
+      {/* 미니 상태 바 — 항상 표시, 클릭하면 디버그 토글 */}
+      <div
+        onPointerDown={e => e.stopPropagation()}
+        onClick={() => setShowDebug(v => !v)}
+        style={{
+          position:'fixed', bottom:10, left:'50%', transform:'translateX(-50%)',
+          display:'flex', gap:8, alignItems:'center',
+          background:'rgba(0,0,0,0.72)', borderRadius:20, padding:'4px 14px',
+          border:`1px solid ${showDebug ? 'rgba(255,200,0,0.4)' : 'rgba(255,255,255,0.1)'}`,
+          zIndex:998, cursor:'pointer', pointerEvents:'auto', userSelect:'none', whiteSpace:'nowrap',
+        }}>
+        <span style={{ fontFamily:'monospace', fontSize:10,
+          color: champion ? '#00ffaa' : 'rgba(255,255,255,0.35)' }}>
+          {champion?.name || '챔피언 대기 중'}
+        </span>
+        <span style={{ color:'rgba(255,255,255,0.2)' }}>·</span>
+        <span style={{ fontFamily:'monospace', fontSize:10,
+          color: playerStats ? '#00d4ff' : 'rgba(255,255,255,0.3)' }}>
+          API {playerStats ? '✓' : '—'}
+        </span>
+        <span style={{ color:'rgba(255,255,255,0.2)' }}>·</span>
+        <span style={{ fontFamily:'monospace', fontSize:10,
+          color: combos.length > 0 ? '#aaa' : 'rgba(255,255,255,0.3)' }}>
+          콤보 {combos.length}개
+        </span>
+        {recordState === 'recording' && <>
+          <span style={{ color:'rgba(255,255,255,0.2)' }}>·</span>
+          <span style={{ width:6, height:6, borderRadius:'50%', background:'#ff3366',
+            boxShadow:'0 0 6px #ff3366', animation:'pulse 1s infinite', flexShrink:0 }} />
+          <span style={{ fontFamily:'monospace', fontSize:10, fontWeight:700, color:'#ff3366' }}>
+            REC {recordInputsRef.current.length}키
+          </span>
+        </>}
+        <span style={{ color:'rgba(255,255,255,0.2)' }}>·</span>
+        <span style={{ fontFamily:'monospace', fontSize:9,
+          color: showDebug ? 'rgba(255,200,0,0.8)' : 'rgba(255,255,255,0.3)' }}>
+          {showDebug ? '▲DBG' : '▼DBG'}
+        </span>
+      </div>
+
+      {/* 전체 위젯 스케일 컨테이너 — control center의 +/− 로 조절 */}
+      <div style={{ position:'absolute', inset:0, zoom: widgetScale }}>
+
+      {/* 통합: 챔피언 + 콤보 목록 */}
+      <Widget defaultPos={DEFAULT.champion} width={240} visible={show.champion} scale={widgetScale}>
+        <div className="wh" style={{
+          display:'flex', alignItems:'center', gap:12, padding:'12px 16px',
+          borderBottom:'1px solid rgba(0,190,255,0.12)',
+          background:'linear-gradient(90deg,rgba(0,20,50,0.6),rgba(20,0,50,0.4))',
+          cursor:'grab', userSelect:'none',
+        }}>
+          {/* 챔피언 초상화 */}
+          <div style={{ width:44, height:44, borderRadius:7, overflow:'hidden', flexShrink:0,
+            border:'2px solid rgba(0,200,255,0.45)', background:'rgba(0,10,30,0.9)',
+            display:'flex', alignItems:'center', justifyContent:'center',
+            boxShadow:'0 0 12px rgba(0,200,255,0.25)' }}>
+            {champion && patch
+              ? <img src={`https://ddragon.leagueoflegends.com/cdn/${patch}/img/champion/${champion.name}.png`} width={44} height={44} style={{display:'block',objectFit:'cover'}} onError={e=>e.currentTarget.style.display='none'} />
+              : <span style={{fontFamily:'monospace',fontSize:15,color:'rgba(0,200,255,0.45)',fontWeight:900}}>?</span>
+            }
+          </div>
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:18, fontWeight:800, lineHeight:1.2, letterSpacing:0.3,
+              textShadow: champion ? '0 0 12px rgba(0,200,255,0.45)' : 'none' }}>
+              {champion?.name || '—'}
+            </div>
+            <div style={{ fontSize:12, fontFamily:'monospace', marginTop:3,
+              color: champion ? '#00ffaa' : 'rgba(255,255,255,0.3)',
+              textShadow: champion ? '0 0 8px rgba(0,255,170,0.5)' : 'none' }}>
+              {!champion ? '● 챔피언 감지 대기 중'
+                : combos.length > 0 ? `● 콤보 ${combos.length}개 로드됨`
+                : '● 등록된 콤보 없음 (웹 확인)'}
+
+            </div>
+          </div>
+          <span style={{ width:8, height:8, borderRadius:'50%', flexShrink:0,
+            background: champion ? '#00ffaa' : 'rgba(255,255,255,0.15)',
+            boxShadow: champion ? '0 0 10px #00ffaa, 0 0 20px rgba(0,255,170,0.4)' : 'none' }} />
+        </div>
+        <ComboQueueWidget combos={combos} activeId={activeId} onSelect={id=>{setActiveId(id);resetSession();}} />
+      </Widget>
+
+      {/* 통합: 콤보 시퀀스 + 런 기록 */}
+      <Widget defaultPos={DEFAULT.sequence} width={400} visible={show.sequence} scale={widgetScale}>
+        <WHeader title="연습" sub={activeCombo?.title} right={
+          <span style={{ fontFamily:'monospace', fontSize:11, fontWeight:700, color:DIFF_COLOR[activeCombo?.difficulty]||'#aaa',
+            textShadow:`0 0 8px ${DIFF_COLOR[activeCombo?.difficulty]||'#aaa'}` }}>
+            {activeCombo?.difficulty?.toUpperCase()}
+          </span>
+        } />
+        <RequirementsWidget gameSpecific={comboDetail?.game_specific ?? activeCombo?.game_specific} playerStats={playerStats} patch={patch} />
+        <ComboSequenceWidget
+          combo={activeCombo} playMs={playMs} totalMs={TOTAL}
+          score={score} lastQuality={lastQuality}
+          loopMode={loopMode} runCount={runLog.length}
+          playState={playState} liveInputs={liveInputs}
+        />
+        {runLog.length > 0 && (
+          <div style={{ height:1, background:'linear-gradient(90deg,transparent,rgba(0,200,255,0.2),transparent)' }} />
+        )}
+        <RunHistoryWidget runLog={runLog} playState={playState} />
+      </Widget>
+
+      <Widget defaultPos={DEFAULT.bindings} width={260} visible={show.bindings} scale={widgetScale}>
+        <WHeader title="키 바인딩" sub="클릭하여 변경" />
+        <BindingsWidget bindings={bindings} onChange={setBindings} champData={champData} patch={patch} />
+      </Widget>
+
+      <VideoWidget videoUrl={comboDetail?.videoUrl} visible={show.video} defaultPos={DEFAULT.video} scale={widgetScale} />
+
+      <Widget defaultPos={DEFAULT.recordLog} width={260} visible={show.recordLog} scale={widgetScale}>
+        <WHeader title="녹화" sub={recordState==='recording'?'● REC':recordTakes.length>0?`${recordTakes.length}개 테이크`:''} />
+        <RecordLogWidget
+          takes={recordTakes}
+          recordState={recordState}
+          onSelectTake={setSelectedTakeId}
+          onDeleteTake={id => setRecordTakes(prev => prev.filter(t => t.id !== id))}
+          selectedTakeId={selectedTakeId}
+          onDownload={handleDownload}
+          downloadState={downloadState}
+        />
+      </Widget>
+
+      <Widget defaultPos={DEFAULT.control} width={220} scale={widgetScale}>
+        <ControlWidget
+          show={show} onToggle={toggleShow}
+          playState={playState} onPlayToggle={() => togglePlayRef.current?.()}
+          loopMode={loopMode} onLoopChange={m=>{setLoopMode(m);runCountRef.current=0;}}
+          widgetScale={widgetScale} onScaleChange={setWidgetScale}
+          showDebug={showDebug} onToggleDebug={() => setShowDebug(v => !v)}
+          recordState={recordState}
+          onRecordToggle={() => recordState === 'recording' ? stopRecordRef.current?.() : startRecordRef.current?.()}
+          onRecordCancel={() => cancelRecordRef.current?.()}
+        />
+      </Widget>
+
+      </div>{/* 스케일 컨테이너 끝 */}
+
+      {/* ── 디버그 패널 (우상단 — 미니맵 회피) — 스케일 밖, 화면 고정 위치 ── */}
+      {showDebug && (
+        <div style={{ position:'fixed', right:16, top:'35%', width:380, pointerEvents:'auto',
+          background:'rgba(0,0,0,0.88)', border:'1px solid rgba(255,200,0,0.4)', borderRadius:8,
+          fontFamily:'monospace', fontSize:11, color:'#ffe566', padding:'10px 12px', zIndex:999 }}>
+          <div style={{ fontWeight:700, fontSize:12, marginBottom:6, letterSpacing:2, color:'#ffd700' }}>
+            ■ DEBUG &nbsp;<span style={{ fontWeight:400, fontSize:10, color:'rgba(255,200,0,0.6)' }}>F8로 닫기</span>
+          </div>
+          <div style={{ marginBottom:4, color:'rgba(255,255,255,0.7)' }}>
+            챔피언: <span style={{ color: champion ? '#00ffaa' : '#ff5577' }}>{champion?.name || '없음'}</span>
+            &nbsp;|&nbsp; 콤보: <span style={{ color:'#00d4ff' }}>{combos.length}개</span>
+            &nbsp;|&nbsp; API: <span style={{ color: playerStats ? '#00ffaa' : '#ff5577' }}>{playerStats ? 'OK' : '대기'}</span>
+            &nbsp;|&nbsp; 크기: <span style={{ color:'#00d4ff' }}>{Math.round(widgetScale*100)}%</span>
+          </div>
+          {playerStats && (
+            <div style={{ marginBottom:4, color:'rgba(255,255,255,0.6)', fontSize:10 }}>
+              Lv{playerStats.level} | AS {playerStats.attackSpeed?.toFixed(2)} | AH {playerStats.abilityHaste}
+            </div>
+          )}
+          <div style={{ borderTop:'1px solid rgba(255,200,0,0.2)', marginTop:4, paddingTop:4 }}>
+            {debugLog.length === 0
+              ? <div style={{ color:'rgba(255,255,255,0.3)' }}>이벤트 없음</div>
+              : debugLog.map((l, i) => (
+                  <div key={i} style={{ color: i===0 ? '#fff' : 'rgba(255,255,255,0.55)', lineHeight:1.6,
+                    borderBottom: i < debugLog.length-1 ? '1px solid rgba(255,255,255,0.06)' : 'none' }}>{l}</div>
+                ))
+            }
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

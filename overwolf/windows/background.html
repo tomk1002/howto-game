@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>ComboGG Background</title>
+</head>
+<body>
+<script>
+const LOL_GAME_ID     = 5426;
+const LOL_LAUNCHER_ID = 10902;
+const IS_OW = typeof overwolf !== 'undefined';
+
+// ── 오버레이 창 관리 ─────────────────────────────────────────
+function fitOverlayToGame(windowId) {
+  // 실행 중인 게임의 실제 해상도에 맞춰 오버레이 창 크기/위치 조정
+  overwolf.games.getRunningGameInfo(info => {
+    if (!info) return;
+    // logicalWidth/Height = DPI 스케일 적용된 논리 픽셀
+    const w = info.logicalWidth  || info.width  || 1920;
+    const h = info.logicalHeight || info.height || 1080;
+    overwolf.windows.changeSize({ window_id: windowId, width: w, height: h, auto_dpi_resize: false }, () => {});
+    overwolf.windows.changePosition(windowId, 0, 0, () => {});
+    console.log(`[BG] overlay resized to ${w}x${h}`);
+  });
+}
+
+function openOverlay() {
+  if (!IS_OW) return;
+  overwolf.windows.obtainDeclaredWindow('overlay', result => {
+    if (!result.success) return;
+    const wid = result.window.id;
+    overwolf.windows.restore(wid, () => {
+      fitOverlayToGame(wid);
+    });
+  });
+}
+function closeOverlay() {
+  if (!IS_OW) return;
+  overwolf.windows.close('overlay', () => {});
+}
+
+// ── 인게임 API features (재시도 포함) ───────────────────────
+function setGameFeatures(attempt) {
+  attempt = attempt || 0;
+  if (!IS_OW) return;
+  overwolf.games.events.setRequiredFeatures(
+    ['me', 'champion', 'game_info', 'summoner_info', 'live_client_data'],
+    s => {
+      console.log('[BG] game features attempt', attempt, s);
+      if (!s.success && attempt < 15) {
+        setTimeout(() => setGameFeatures(attempt + 1), 2000);
+      }
+    }
+  );
+}
+
+// ── 런처 API features (챔피언 선택 화면 등) ──────────────────
+function setLauncherFeatures() {
+  if (!IS_OW) return;
+  overwolf.games.launchers.events.setRequiredFeatures(
+    [LOL_LAUNCHER_ID],
+    ['summoner_info', 'champ_select', 'game_flow'],
+    s => console.log('[BG] launcher features:', s)
+  );
+}
+
+// ── 런처 이벤트 → overlay로 메시지 전달 ─────────────────────
+function sendToOverlay(type, payload) {
+  if (!IS_OW) return;
+  overwolf.windows.obtainDeclaredWindow('overlay', r => {
+    if (r.success) {
+      overwolf.windows.sendMessage(r.window.id, type, payload, () => {});
+    }
+  });
+}
+
+if (IS_OW) {
+  // 인게임 감지 (5426) → 오버레이 열기
+  overwolf.games.onGameInfoUpdated.addListener(e => {
+    if (!e.gameInfo) return;
+    if (e.gameInfo.isRunning && e.gameInfo.classId === LOL_GAME_ID) {
+      openOverlay();
+      setGameFeatures();
+    } else {
+      closeOverlay();
+    }
+  });
+
+  // 게임 해상도 변경 시 (전체화면 <-> 창모드 전환 등) 오버레이 재조정
+  overwolf.games.onGameInfoUpdated.addListener(e => {
+    if (!e.gameInfo?.isRunning) return;
+    if (e.resolutionChanged || e.focusChanged) {
+      overwolf.windows.obtainDeclaredWindow('overlay', r => {
+        if (r.success) fitOverlayToGame(r.window.id);
+      });
+    }
+  });
+
+  // 실행 중인 게임 즉시 확인
+  overwolf.games.getRunningGameInfo(info => {
+    if (info && info.isRunning && info.classId === LOL_GAME_ID) {
+      openOverlay();
+      setGameFeatures();
+    }
+  });
+
+  // 런처 이벤트 — onInfoUpdates는 개별 key-value 업데이트를 flat 구조로 전달
+  // { feature, category, key, value } 형태 (getInfo의 nested 구조와 다름)
+  overwolf.games.launchers.events.onInfoUpdates.addListener(update => {
+    const feature  = update.feature;
+    const key      = update.key;
+    const value    = update.value;
+
+    console.log('[BG] launcher update', feature, key, typeof value === 'string' ? value.slice(0, 80) : value);
+
+    // 소환사 정보
+    if (feature === 'summoner_info') {
+      sendToOverlay('summoner_info', { [key]: value });
+    }
+
+    // 챔피언 선택 정보 (raw JSON)
+    if (feature === 'champ_select' && key === 'raw') {
+      try {
+        const raw = typeof value === 'string' ? JSON.parse(value) : value;
+        const myCell = raw.localPlayerCellId;
+
+        // 1차 시도: myTeam 배열에서 localPlayer 픽 의도 확인 (더 안정적)
+        const myTeamMember = raw.myTeam?.find(m => m.cellId === myCell);
+        const intentId = myTeamMember?.championPickIntent || myTeamMember?.championId;
+
+        // 2차 시도: actions 배열에서 pick 액션 확인
+        const actionId = raw.actions?.flat()?.find(
+          a => a.actorCellId === myCell && a.type === 'pick' && a.championId > 0
+        )?.championId;
+
+        const championId = intentId || actionId;
+        if (championId && championId > 0) {
+          console.log('[BG] champ_select championId:', championId);
+          sendToOverlay('champ_select', { championId });
+        }
+      } catch(e) {
+        console.warn('[BG] champ_select parse error', e);
+      }
+    }
+
+    // 게임 페이즈
+    if (feature === 'game_flow' && key === 'phase') {
+      sendToOverlay('game_flow', { phase: value });
+      if (value === 'ChampSelect') setLauncherFeatures();
+    }
+  });
+
+  // 런처 현재 상태 즉시 조회
+  overwolf.games.launchers.events.getInfo(LOL_LAUNCHER_ID, info => {
+    if (info?.res?.summoner_info) {
+      sendToOverlay('summoner_info', info.res.summoner_info);
+    }
+  });
+
+  setLauncherFeatures();
+
+  // F10 핫키 → 오버레이 토글
+  overwolf.settings.hotkeys.onPressed.addListener(e => {
+    if (e.name !== 'toggle_overlay') return;
+    overwolf.windows.getWindowState('overlay', ({ window_state }) => {
+      if (window_state === 'normal' || window_state === 'maximized') closeOverlay();
+      else openOverlay();
+    });
+  });
+
+} else {
+  console.log('[BG] browser mode');
+}
+</script>
+</body>
+</html>
