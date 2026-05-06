@@ -1145,11 +1145,6 @@ const RecordLogWidget = ({ takes, practiceRuns = [], recordState, onSelectTake, 
                       </span>
                     )}
                   </div>
-                  <div onPointerDown={e => e.stopPropagation()}
-                    onClick={e => { e.stopPropagation(); onDeleteTake(tk.id); }}
-                    style={{ cursor:'pointer', fontSize:11, color:'rgba(255,80,100,0.45)',
-                      padding:'0 4px', lineHeight:1, userSelect:'none', flexShrink:0 }}
-                    title="삭제">×</div>
                 </div>
               );
             })}
@@ -1272,6 +1267,14 @@ const RecordLogWidget = ({ takes, practiceRuns = [], recordState, onSelectTake, 
                       onMouseEnter={e => e.currentTarget.style.background='rgba(0,200,255,0.08)'}
                       onMouseLeave={e => e.currentTarget.style.background='transparent'}>
                       ↓ .tutfile 내보내기
+                    </div>
+                    <div onClick={() => { setMoreOpen(false); onDeleteTake(selectedTake.id); }}
+                      style={{ padding:'7px 10px', borderRadius:4, cursor:'pointer',
+                        fontFamily:'monospace', fontSize:11, color:'#ff5577',
+                        userSelect:'none', borderTop:'1px solid rgba(255,255,255,0.06)', marginTop:2 }}
+                      onMouseEnter={e => e.currentTarget.style.background='rgba(255,80,100,0.08)'}
+                      onMouseLeave={e => e.currentTarget.style.background='transparent'}>
+                      🗑 이 take 삭제
                     </div>
                   </div>
                 )}
@@ -1584,11 +1587,11 @@ const ShareStatus = ({ shareState, onClose, onTokenConfirm, onRetry }) => {
   if (!shareState || shareState.status === 'idle') return null;
   const { status, progress, error, editUrl } = shareState;
 
-  // 작은 플로팅 카드 (전체 화면 모달 대신 — 게임 입력 차단을 최소화)
+  // 작은 플로팅 카드 — 화면 상단 중앙에 고정 (좌/우 끝은 듀얼모니터/4K에서 가시영역 밖일 수 있음)
   const cardWrap = {
-    position:'fixed', top:20, right:20,
+    position:'fixed', top:20, left:'50%', transform:'translateX(-50%)',
     zIndex:1000, pointerEvents:'auto',
-    maxWidth:340,
+    width:340,
   };
   const boxStyle = {
     background:'rgba(8,12,30,0.97)',
@@ -1792,9 +1795,10 @@ function autoDetectSteps(inputs, durationMs, gapThreshold = 400) {
 
 // ── 디버그 패널 (드래그 가능, 우측 중간 기본 위치) ─────────────────
 const DebugPanelDraggable = ({ children }) => {
+  // 좌측 상단 기본 — 우측 끝은 듀얼모니터/4K 환경에서 가시영역 밖일 수 있어 무조건 좌측에 둠
   const [pos, setPos] = useState(() => ({
-    x: Math.max(20, window.innerWidth - 400),
-    y: Math.round(window.innerHeight * 0.30),
+    x: 16,
+    y: Math.round(window.innerHeight * 0.18),
   }));
   const onPointerDown = useCallback((e) => {
     if (!e.target.closest('.debug-handle')) return;
@@ -2847,10 +2851,10 @@ const App = () => {
     return {
       champion:  { x: u(100),       y: u(20) },
       sequence:  { x: u(vw * 0.32), y: u(20) },
-      bindings:  { x: u(100),       y: u(vh * 0.55) },
-      control:   { x: u(100),       y: u(vh * 0.36) },
+      bindings:  { x: u(vw - 320),  y: u(vh * 0.50) },
+      control:   { x: u(100),       y: u(vh * 0.80) },
       video:     { x: u(vw * 0.55), y: u(20) },
-      recordLog: { x: u(100),       y: u(vh * 0.28) }, // 챔피언 아래, 컨트롤 위
+      recordLog: { x: u(100),       y: u(vh * 0.32) }, // 챔피언 아래, 컨트롤(0.80) 위 충분히 공간 확보
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
