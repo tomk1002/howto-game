@@ -150,6 +150,19 @@ function vkToKey(code) {
 // ── Task 9: LoL game snapshot parser ─────────────────────────
 // Overwolf games.events.getInfo() 의 raw 응답을 .tutfile manifest.game_specific 형태로 변환
 // 모든 필드는 optional chaining으로 보호 — 누락된 필드는 null/0/[]
+
+// 소환사 주문 ID 추출: Data Dragon은 "SummonerFlash", "SummonerDot" 등 영어 ID를 요구
+// Overwolf는 한글 displayName("점화", "점멸")을 주므로 rawDisplayName에서 ID를 파싱
+function summonerSpellId(spell) {
+  if (!spell) return null;
+  if (spell.id && /^Summoner[A-Z]/.test(spell.id)) return spell.id;
+  // rawDisplayName: 'GeneratedTip_SummonerSpell_SummonerDot_DisplayName'
+  const m = /SummonerSpell_(Summoner[A-Za-z]+)/.exec(spell.rawDisplayName || '');
+  if (m) return m[1];
+  // 한글 displayName fallback (서버가 매핑 못 할 가능성 있음)
+  return spell.displayName || null;
+}
+
 function parseLolSnapshot(raw) {
   if (!raw) return null;
   // 헬퍼: 값이 string이면 JSON.parse, 아니면 그대로
@@ -215,8 +228,8 @@ function parseLolSnapshot(raw) {
         R: Number(abilities.R?.abilityLevel ?? abilities.R?.ability_level) || 0,
       },
       summoner_spells: [
-        aps.summonerSpellOne?.displayName ?? aps.summoner_spell_one?.display_name,
-        aps.summonerSpellTwo?.displayName ?? aps.summoner_spell_two?.display_name,
+        summonerSpellId(aps.summonerSpellOne || aps.summoner_spell_one),
+        summonerSpellId(aps.summonerSpellTwo || aps.summoner_spell_two),
       ].filter(Boolean),
       required_items: itemList
         .map(i => String(i?.itemID ?? i?.item_id ?? i?.id ?? ''))
