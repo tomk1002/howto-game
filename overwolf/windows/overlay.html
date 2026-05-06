@@ -2435,11 +2435,15 @@ const App = () => {
               settings: {
                 audio: { mic: { enable: false }, game: { enable: true } },
                 video: {
-                  auto_calc_kbps: true,
+                  auto_calc_kbps: false, // 명시적 bitrate 사용 (auto는 너무 보수적이라 1Mbps 정도로 떨어짐)
+                  kbps: 6000, // 1080p 기준 적절한 화질 (~6Mbps). 720p면 4000도 OK
                   fps: 30,
                   width: 0, height: 0, // 0 = 게임 해상도 자동
                   buffer_length: 0, // 과거 버퍼 사용 안 함
                   sub_folder_name: 'ComboGG',
+                  // 자동 분할 비활성: 짧은 콤보(보통 5-30초)는 한 파일에 담아야 함
+                  max_file_size_bytes: 0, // 0 = 무제한
+                  max_quota_gb: 0, // 0 = 디스크 quota 제한 없음
                 }
               }
             };
@@ -2497,9 +2501,15 @@ const App = () => {
         const sid = streamIdRef.current;
         streamIdRef.current = null;
         overwolf.streaming.stop(sid, (res) => {
-          window._dbgPush('[stream] stop callback — keys: ' + Object.keys(res || {}).join(','));
+          // 풀 진단: split 발생 여부, last_file_path, duration 확인
+          window._dbgPush(`[stream] stop res — split=${res?.split} count=${res?.splitCount} duration=${res?.duration}ms`);
+          window._dbgPush(`[stream]   file_path=${res?.file_path}`);
+          if (res?.last_file_path && res.last_file_path !== res.file_path) {
+            window._dbgPush(`[stream]   ⚠ last_file_path 다름=${res.last_file_path}`);
+          }
           if (res && res.success) {
-            const path = res.file_path || res.url || res.path || res.media_url;
+            // 분할되면 last_file_path가 더 최근일 수 있음. 우선 file_path 사용 (보통 첫번째 = 시작부터)
+            const path = res.file_path || res.last_file_path || res.url || res.path || res.media_url;
             if (!path) {
               window._dbgPush('[stream] 정지됐지만 파일 경로 없음: ' + JSON.stringify(res).slice(0,300));
               return;
