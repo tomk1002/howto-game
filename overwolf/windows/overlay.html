@@ -152,46 +152,76 @@ function vkToKey(code) {
 // 모든 필드는 optional chaining으로 보호 — 누락된 필드는 null/0/[]
 function parseLolSnapshot(raw) {
   if (!raw) return null;
+  // 헬퍼: 값이 string이면 JSON.parse, 아니면 그대로
+  const maybeParse = v => {
+    if (typeof v !== 'string') return v;
+    try { return JSON.parse(v); } catch { return null; }
+  };
   try {
-    // live_client_data는 stringified JSON이거나 이미 파싱된 객체로 올 수 있음
-    const lcd = typeof raw.live_client_data === 'string'
-      ? JSON.parse(raw.live_client_data)
-      : raw.live_client_data;
-    const ap = lcd?.activePlayer || {};
-    const abilities = ap.abilities || {};
-    const stats = ap.championStats || {};
-    const summoners = ap.summonerSpells || {};
+    // TFT(롤체) 큐 가드 — 1090~1160 또는 4xxx대 (TFT/RGM)는 LoL 콤보 데이터로 부적합
+    // queueId가 LoL이 아니면 snapshot null로 (콤보는 LoL 전용)
+    const queueId = parseInt(raw.game_info?.queueId, 10);
+    const TFT_QUEUES = [1090, 1100, 1110, 1130, 1140, 1160, 1150];
+    if (Number.isFinite(queueId) && (TFT_QUEUES.includes(queueId) || (queueId >= 1090 && queueId < 1200))) {
+      window._dbgPush && window._dbgPush(`[snapshot] TFT 큐 감지(${queueId}) — LoL 콤보 메타로 부적합, skip`);
+      return null;
+    }
 
-    // items: live_client_data.activePlayer는 보통 items가 없음 — allPlayers에서 본인 매칭
-    const myName = ap.summonerName || ap.riotIdGameName;
-    const allPlayers = Array.isArray(lcd?.allPlayers) ? lcd.allPlayers : [];
-    const me = allPlayers.find(p =>
-      p.summonerName === myName ||
-      p.riotIdGameName === myName ||
-      p.riotId === myName
-    );
-    const itemList = (ap.items && Array.isArray(ap.items) ? ap.items : null)
-                  || (me?.items && Array.isArray(me.items) ? me.items : [])
-                  || [];
+    // live_client_data 자체가 string일 수도 있음
+    let lcd = maybeParse(raw.live_client_data);
+    if (!lcd) return null;
+
+    // active_player (snake_case) 또는 activePlayer (camelCase) — Overwolf는 snake로 옴
+    let ap = lcd.active_player || lcd.activePlayer || {};
+    ap = maybeParse(ap) || ap;
+
+    // all_players (배열, 종종 string) — items/summonerSpells의 권위 있는 출처
+    let players = lcd.all_players || lcd.allPlayers || [];
+    players = maybeParse(players) || players;
+    if (!Array.isArray(players)) players = [];
+
+    // 본인 식별: 이름 매칭 → 챔프 매칭 → 첫 번째 fallback
+    const summonerName = raw.summoner_info?.name || ap.summonerName || ap.summoner_name;
+    const championName = raw.summoner_info?.champion; // e.g. "Nautilus"
+    const me = players.find(p => p.summonerName === summonerName)
+            || players.find(p => p.summonerName?.startsWith(summonerName))
+            || players.find(p => p.rawChampionName?.toLowerCase().includes((championName || '').toLowerCase()))
+            || players.find(p => !p.isBot)
+            || players[0]
+            || {};
+
+    // championStats / abilities는 active_player에만 있음
+    const stats = ap.championStats || ap.champion_stats || {};
+    const abilities = ap.abilities || {};
+    // summoner spells: active_player.summonerSpells 우선, 없으면 me.summonerSpells
+    const aps = ap.summonerSpells || ap.summoner_spells || me.summonerSpells || me.summoner_spells || {};
+
+    // 아이템: 본인 me.items가 가장 정확
+    const itemList = (Array.isArray(me.items) && me.items.length > 0)
+      ? me.items
+      : (Array.isArray(ap.items) ? ap.items : []);
+
+    const lvl = ap.level ?? me.level ?? null;
+    const lvlNum = lvl !== null ? Number(lvl) : null;
 
     return {
-      required_level: ap.level ?? null,
-      ability_haste_min: stats.abilityHaste ?? null,
-      attack_speed_min: stats.attackSpeed ?? null,
+      required_level: Number.isFinite(lvlNum) ? lvlNum : null,
+      ability_haste_min: Number(stats.abilityHaste ?? stats.ability_haste) || null,
+      attack_speed_min: Number(stats.attackSpeed ?? stats.attack_speed) || null,
       required_skills: {
-        Q: abilities.Q?.abilityLevel ?? 0,
-        W: abilities.W?.abilityLevel ?? 0,
-        E: abilities.E?.abilityLevel ?? 0,
-        R: abilities.R?.abilityLevel ?? 0,
+        Q: Number(abilities.Q?.abilityLevel ?? abilities.Q?.ability_level) || 0,
+        W: Number(abilities.W?.abilityLevel ?? abilities.W?.ability_level) || 0,
+        E: Number(abilities.E?.abilityLevel ?? abilities.E?.ability_level) || 0,
+        R: Number(abilities.R?.abilityLevel ?? abilities.R?.ability_level) || 0,
       },
       summoner_spells: [
-        summoners.summonerSpellOne?.displayName,
-        summoners.summonerSpellTwo?.displayName,
+        aps.summonerSpellOne?.displayName ?? aps.summoner_spell_one?.display_name,
+        aps.summonerSpellTwo?.displayName ?? aps.summoner_spell_two?.display_name,
       ].filter(Boolean),
       required_items: itemList
-        .map(i => String(i?.itemID ?? i?.id ?? ''))
-        .filter(Boolean),
-      runes: ap.fullRunes || null,
+        .map(i => String(i?.itemID ?? i?.item_id ?? i?.id ?? ''))
+        .filter(id => id && id !== '0'),
+      runes: ap.fullRunes || ap.full_runes || null,
     };
   } catch (e) {
     window._dbgPush && window._dbgPush(`[snapshot] parse error: ${e?.message || e}`);
