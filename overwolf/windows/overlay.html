@@ -2695,6 +2695,9 @@ const App = () => {
         patch,
         take: workingTake,
       });
+      // 진단: zip blob에 video.mp4가 정말 들어갔는지 크기로 검증
+      // 7-8MB 가까우면 video 포함, 1KB 안팎이면 video 누락
+      window._dbgPush(`[share] tutfile blob: ${(tutfileBlob.size / 1024).toFixed(1)} KB (video bytes: ${workingTake.videoBytes.byteLength})`);
 
       // 1. presigned URL 발급
       setShareState({ status: 'uploading', take: workingTake, progress: 30 });
