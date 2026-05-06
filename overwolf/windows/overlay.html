@@ -2611,8 +2611,10 @@ const App = () => {
   // 폼은 게임 입력과 충돌해서 오버레이 안에서 쓸 수 없음. 자동 메타데이터로
   // draft 콤보를 만들고 브라우저로 /combos/[id]/edit 페이지를 열어 거기서 편집한다.
   const handleShare = useCallback(async (take) => {
+    window._dbgPush(`[share] handleShare 호출됨 — take=${take?.id?.slice(0,8) || 'null'}`);
     if (!take) return;
     const champ = championRef.current;
+    window._dbgPush(`[share] champion=${champ?.name || '없음'} videoBytes=${take.videoBytes?.byteLength || 0}`);
 
     // Phase 1 — 비디오 바이트 또는 파일 경로 대기 (최대 15초)
     setShareState({ status: 'waiting-video', take });
@@ -2661,13 +2663,17 @@ const App = () => {
       return;
     }
 
+    window._dbgPush(`[share] Phase 1 통과 — videoBytes ${workingTake.videoBytes?.byteLength || 0} bytes`);
+
     // Phase 2 — 토큰 확인 (없으면 브라우저로 desktop-login 열고 awaiting-token)
     let token = desktopTokenRef.current;
+    window._dbgPush(`[share] Phase 2 — token ${token ? 'OK (' + token.slice(0,12) + '...)' : '없음 → 브라우저 열기'}`);
     if (!token) {
       const loginUrl = 'https://combogg-web.vercel.app/desktop-login';
       if (IS_OW) overwolf.utils.openUrlInBrowser(loginUrl);
       else window.open(loginUrl, '_blank');
       setShareState({ status: 'awaiting-token', take: workingTake });
+      window._dbgPush('[share] awaiting-token 상태로 전환 — desktop-login 페이지에서 토큰 복사 후 붙여넣기 필요');
       return;
     }
 
@@ -2676,7 +2682,7 @@ const App = () => {
 
     try {
       setShareState({ status: 'uploading', take: workingTake, progress: 10 });
-      addDebug(`[Share] video ${workingTake.videoBytes.byteLength}bytes, draft 업로드 시작`);
+      window._dbgPush(`[share] Phase 3 — draft 업로드 시작 (video ${workingTake.videoBytes.byteLength} bytes)`);
 
       const tutfileBlob = window.buildTutfileBlob({
         title: autoTitle,
