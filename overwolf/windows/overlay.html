@@ -2453,14 +2453,19 @@ const App = () => {
         const sid = streamIdRef.current;
         streamIdRef.current = null;
         overwolf.streaming.stop(sid, (res) => {
+          window._dbgPush('[stream] stop callback — keys: ' + Object.keys(res || {}).join(','));
           if (res && res.success) {
             const path = res.file_path || res.url || res.path || res.media_url;
             if (!path) {
-              window._dbgPush('[stream] 정지됐지만 파일 경로 없음: ' + JSON.stringify(res));
+              window._dbgPush('[stream] 정지됐지만 파일 경로 없음: ' + JSON.stringify(res).slice(0,300));
               return;
             }
             window._dbgPush('[stream] 정지 OK, 파일=' + path);
-            // 파일을 바이트 배열로 읽어 take.videoBytes에 패치
+            // 즉시 take에 videoFilePath 저장 — handleShare가 fallback으로 직접 read 가능
+            setRecordTakes(prev => prev.map(t =>
+              t.id === take.id ? { ...t, videoFilePath: path } : t
+            ));
+            // 비동기로 바이트도 미리 읽어둠 — 성공하면 업로드 더 빠름
             overwolf.io.readBinaryFile(path, {}, ({ success: readOk, content, error }) => {
               if (readOk && content) {
                 const videoBytes = new Uint8Array(content);
@@ -2469,7 +2474,7 @@ const App = () => {
                 ));
                 window._dbgPush(`[stream] video attached to take ${take.id}, ${videoBytes.byteLength} bytes`);
               } else {
-                window._dbgPush(`[stream] readBinaryFile failed: ${error || 'no content'} (path: ${path})`);
+                window._dbgPush(`[stream] readBinaryFile 실패 (handleShare에서 재시도): ${error || 'no content'} (path: ${path})`);
               }
             });
           } else {
@@ -2565,15 +2570,37 @@ const App = () => {
     if (!take) return;
     const champ = championRef.current;
 
-    // Phase 1 — 비디오 바이트 대기 (최대 15초)
+    // Phase 1 — 비디오 바이트 또는 파일 경로 대기 (최대 15초)
     setShareState({ status: 'waiting-video', take });
     const startWait = Date.now();
     let workingTake = take;
     while (Date.now() - startWait < 15000) {
       const fresh = recordTakesRef.current.find(t => t.id === take.id) || take;
+      // (1) 이미 메모리에 바이트 있으면 바로 사용
       if (fresh.videoBytes && fresh.videoBytes.byteLength > 0) {
         workingTake = fresh;
         break;
+      }
+      // (2) 파일 경로는 있지만 비동기 read가 실패/지연 — 직접 읽어보자
+      if (fresh.videoFilePath && IS_OW && overwolf.io) {
+        window._dbgPush('[share] videoBytes 없음 — videoFilePath로 직접 read 시도');
+        const readOk = await new Promise(resolve => {
+          overwolf.io.readBinaryFile(fresh.videoFilePath, {}, ({ success, content, error }) => {
+            if (success && content) {
+              const videoBytes = new Uint8Array(content);
+              setRecordTakes(prev => prev.map(t =>
+                t.id === fresh.id ? { ...t, videoBytes } : t
+              ));
+              workingTake = { ...fresh, videoBytes };
+              window._dbgPush(`[share] direct read 성공 — ${videoBytes.byteLength} bytes`);
+              resolve(true);
+            } else {
+              window._dbgPush(`[share] direct read 실패: ${error || 'no content'}`);
+              resolve(false);
+            }
+          });
+        });
+        if (readOk) break;
       }
       // 사용자가 취소(닫기/다른 take 선택)한 경우 중단
       const cur = shareStateRef.current;
@@ -2582,7 +2609,11 @@ const App = () => {
     }
 
     if (!workingTake.videoBytes || workingTake.videoBytes.byteLength === 0) {
-      setShareState({ status: 'error', take, error: '비디오 캡처 실패. 다시 녹화해주세요.' });
+      const fresh = recordTakesRef.current.find(t => t.id === take.id) || take;
+      const hint = fresh.videoFilePath
+        ? `비디오 읽기 실패 (파일은 있음: ${fresh.videoFilePath.split(/[\\\/]/).pop()}). 다시 시도해보세요.`
+        : '비디오 캡처 실패. 다시 녹화해주세요.';
+      setShareState({ status: 'error', take, error: hint });
       return;
     }
 
@@ -2855,7 +2886,7 @@ const App = () => {
       champion:  { x: u(100),       y: u(20) },
       sequence:  { x: u(vw * 0.32), y: u(20) },
       bindings:  { x: u(vw - 320),  y: u(vh * 0.42) },
-      control:   { x: u(100),       y: u(vh * 0.62) }, // LoL HUD(하단 ~vh*0.78~) 위, recordLog(0.28) 아래
+      control:   { x: u(100),       y: u(vh * 0.55) }, // LoL HUD(하단 ~vh*0.78~) 위, recordLog(0.28) 아래
       video:     { x: u(vw * 0.55), y: u(20) },
       recordLog: { x: u(100),       y: u(vh * 0.28) }, // 챔피언 아래, 컨트롤(0.62) 위
     };
