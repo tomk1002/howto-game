@@ -4,10 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ComboGG Overlay</title>
-<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
-<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-<script src="https://unpkg.com/fflate@0.8.2/umd/index.js"></script>
+<!-- TODO: Add SRI integrity hashes after pinning final versions (sha384-...) -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.10/babel.min.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/fflate@0.8.2/umd/index.js" crossorigin="anonymous"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { font-size: 16px; -webkit-font-smoothing: subpixel-antialiased; text-rendering: auto; }
@@ -145,9 +146,9 @@ window.fetchChampionData = async (champName) => {
     const versions = await fetch('https://ddragon.leagueoflegends.com/api/versions.json').then(r=>r.json());
     const patch = versions[0];
     // "Lee Sin" → "LeeSin" (공백 제거로 DataDragon 키 변환)
-    const key = champName.replace(/\s+/g, '');
+    const key = encodeURIComponent(champName.replace(/\s+/g, ''));
     const data = await fetch(
-      `https://ddragon.leagueoflegends.com/cdn/${patch}/data/en_US/champion/${key}.json`
+      `https://ddragon.leagueoflegends.com/cdn/${encodeURIComponent(patch)}/data/en_US/champion/${key}.json`
     ).then(r=>r.json());
     return { patch, champ: data.data[key] };
   } catch(e) {
@@ -157,7 +158,8 @@ window.fetchChampionData = async (champName) => {
 };
 
 window.fetchCombos = async (characterId) => {
-  const url = `https://combogg-web.vercel.app/api/combos?game=lol&character=${characterId}&limit=20`;
+  const params = new URLSearchParams({ game: 'lol', character: characterId, limit: '20' });
+  const url = `https://combogg-web.vercel.app/api/combos?${params}`;
   window._dbgPush(`[API] GET character=${characterId}`);
   try {
     const r = await fetch(url);
