@@ -13,7 +13,10 @@
   "permissions": [
     "Extensions",
     "Hotkeys",
-    "GameInfo"
+    "GameInfo",
+    "Media",
+    "FileSystem",
+    "Streaming"
   ],
   "data": {
     "start_window": "background",

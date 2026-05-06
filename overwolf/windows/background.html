@@ -58,7 +58,7 @@ function setGameFeatures(attempt) {
 function setLauncherFeatures() {
   if (!IS_OW) return;
   overwolf.games.launchers.events.setRequiredFeatures(
-    [LOL_LAUNCHER_ID],
+    LOL_LAUNCHER_ID,
     ['summoner_info', 'champ_select', 'game_flow'],
     s => console.log('[BG] launcher features:', s)
   );
@@ -166,6 +166,24 @@ if (IS_OW) {
       if (window_state === 'normal' || window_state === 'maximized') closeOverlay();
       else openOverlay();
     });
+  });
+
+  // 오버레이 → background 메시지 수신 (양방향 메시지 버스)
+  // 'request_snapshot' 수신 시 현재 게임 상태 스냅샷을 캡처하여 오버레이로 회신
+  overwolf.windows.onMessageReceived.addListener(msg => {
+    if (msg.id === 'request_snapshot') {
+      const requestId = msg.content?.requestId || null;
+      try {
+        overwolf.games.events.getInfo(result => {
+          const snapshot = (result && result.success && result.res) || null;
+          console.log('[BG] snapshot captured, success=', !!snapshot);
+          sendToOverlay('game_snapshot', { snapshot, requestId });
+        });
+      } catch (e) {
+        console.warn('[BG] getInfo failed', e);
+        sendToOverlay('game_snapshot', { snapshot: null, requestId });
+      }
+    }
   });
 
 } else {

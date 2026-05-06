@@ -23,7 +23,18 @@
   @keyframes widgetIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
   @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
   @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
-  @keyframes popIn { 0% { opacity:0; } 100% { opacity:1; } }
+  @keyframes countSlam {
+    0%   { transform: scale(1.6); opacity: 0; }
+    20%  { transform: scale(1); opacity: 1; }
+    90%  { transform: scale(1); opacity: 1; }
+    100% { transform: scale(0.85); opacity: 0; }
+  }
+  @keyframes goSlam {
+    0%   { transform: scale(0.3); opacity: 0; }
+    20%  { transform: scale(1.15); opacity: 1; }
+    35%  { transform: scale(1); opacity: 1; }
+    100% { transform: scale(1); opacity: 1; }
+  }
   /* 위젯 스크롤바 */
   ::-webkit-scrollbar { width: 4px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -34,7 +45,85 @@
 <div id="root"></div>
 
 <script>
+console.log('[OVERLAY] script tag executing — line 1 reached');
+window.addEventListener('error', (e) => {
+  console.error('[OVERLAY-FATAL]', e.message, 'at', e.filename + ':' + e.lineno + ':' + e.colno);
+});
 const IS_OW = typeof overwolf !== 'undefined';
+console.log('[OVERLAY] IS_OW =', IS_OW);
+
+// ── Overwolf 파일 I/O 퍼시스턴스 ─────────────────────────────────
+// STATE_PATH: overwolf.io.paths는 OW 런타임에서만 접근 가능
+const STATE_PATH = IS_OW && overwolf.io
+  ? `${overwolf.io.paths.localAppData}/combogg/state.json`
+  : null;
+
+// Promise 래퍼 — OW 콜백 지옥 방지
+function owFileExists(path) {
+  return new Promise(resolve => {
+    if (!IS_OW || !overwolf.io) { resolve(false); return; }
+    overwolf.io.fileExists(path, r => resolve(!!(r && r.found)));
+  });
+}
+function owReadFile(path) {
+  return new Promise(resolve => {
+    if (!IS_OW || !overwolf.io) { resolve(null); return; }
+    overwolf.io.readFileContents(path, overwolf.io.enums.eEncoding.UTF8, r => {
+      resolve(r && r.success ? r.content : null);
+    });
+  });
+}
+function owWriteFile(path, content) {
+  return new Promise(resolve => {
+    if (!IS_OW || !overwolf.io) { resolve(false); return; }
+    overwolf.io.writeFileContents(path, content, overwolf.io.enums.eEncoding.UTF8, false, r => {
+      resolve(!!(r && r.success));
+    });
+  });
+}
+function owMkdir(dirPath) {
+  return new Promise(resolve => {
+    if (!IS_OW || !overwolf.io) { resolve(false); return; }
+    // 실제 API: createDirectory (overwolf.io.dir.create는 존재하지 않음).
+    // 없는 OW 버전이면 writeFileContents가 자동 생성에 의존.
+    if (typeof overwolf.io.createDirectory === 'function') {
+      overwolf.io.createDirectory(dirPath, r => resolve(!!(r && r.success)));
+    } else {
+      resolve(true);
+    }
+  });
+}
+
+// state.json 읽기 → { takes, desktopToken }
+async function readStateFile() {
+  if (!STATE_PATH) return null;
+  try {
+    const raw = await owReadFile(STATE_PATH);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch(e) {
+    window._dbgPush && window._dbgPush(`[IO] state.json 파싱 오류: ${e?.message || e}`);
+    return null;
+  }
+}
+
+// state.json 쓰기
+async function writeStateFile(takes, desktopToken) {
+  if (!STATE_PATH) return;
+  try {
+    // STATE_PATH가 non-null이면 IS_OW && overwolf.io는 이미 보장됨.
+    // overwolf.io.paths를 재참조하지 않고 STATE_PATH에서 dir을 도출해 이중 접근 제거.
+    const dir = STATE_PATH.substring(0, STATE_PATH.lastIndexOf('/'));
+    await owMkdir(dir);
+    // videoBytes (Uint8Array)는 JSON 직렬화 대상에서 제외 — 리플레이 캡처는 세션 내에서만 유효
+    const serializableTakes = takes.map(({ videoBytes: _v, ...rest }) => rest);
+    const content = JSON.stringify({ takes: serializableTakes, desktopToken: desktopToken ?? null }, null, 2);
+    const ok = await owWriteFile(STATE_PATH, content);
+    if (!ok) window._dbgPush && window._dbgPush('[IO] state.json 저장 실패');
+  } catch(e) {
+    window._dbgPush && window._dbgPush(`[IO] writeStateFile 오류: ${e?.message || e}`);
+  }
+}
 
 // Windows Virtual Key 코드 → 키 이름 변환
 const VK = {
@@ -57,6 +146,59 @@ const VK = {
 function vkToKey(code) {
   return VK[code] || String.fromCharCode(code) || String(code);
 }
+
+// ── Task 9: LoL game snapshot parser ─────────────────────────
+// Overwolf games.events.getInfo() 의 raw 응답을 .tutfile manifest.game_specific 형태로 변환
+// 모든 필드는 optional chaining으로 보호 — 누락된 필드는 null/0/[]
+function parseLolSnapshot(raw) {
+  if (!raw) return null;
+  try {
+    // live_client_data는 stringified JSON이거나 이미 파싱된 객체로 올 수 있음
+    const lcd = typeof raw.live_client_data === 'string'
+      ? JSON.parse(raw.live_client_data)
+      : raw.live_client_data;
+    const ap = lcd?.activePlayer || {};
+    const abilities = ap.abilities || {};
+    const stats = ap.championStats || {};
+    const summoners = ap.summonerSpells || {};
+
+    // items: live_client_data.activePlayer는 보통 items가 없음 — allPlayers에서 본인 매칭
+    const myName = ap.summonerName || ap.riotIdGameName;
+    const allPlayers = Array.isArray(lcd?.allPlayers) ? lcd.allPlayers : [];
+    const me = allPlayers.find(p =>
+      p.summonerName === myName ||
+      p.riotIdGameName === myName ||
+      p.riotId === myName
+    );
+    const itemList = (ap.items && Array.isArray(ap.items) ? ap.items : null)
+                  || (me?.items && Array.isArray(me.items) ? me.items : [])
+                  || [];
+
+    return {
+      required_level: ap.level ?? null,
+      ability_haste_min: stats.abilityHaste ?? null,
+      attack_speed_min: stats.attackSpeed ?? null,
+      required_skills: {
+        Q: abilities.Q?.abilityLevel ?? 0,
+        W: abilities.W?.abilityLevel ?? 0,
+        E: abilities.E?.abilityLevel ?? 0,
+        R: abilities.R?.abilityLevel ?? 0,
+      },
+      summoner_spells: [
+        summoners.summonerSpellOne?.displayName,
+        summoners.summonerSpellTwo?.displayName,
+      ].filter(Boolean),
+      required_items: itemList
+        .map(i => String(i?.itemID ?? i?.id ?? ''))
+        .filter(Boolean),
+      runes: ap.fullRunes || null,
+    };
+  } catch (e) {
+    window._dbgPush && window._dbgPush(`[snapshot] parse error: ${e?.message || e}`);
+    return null;
+  }
+}
+
 const _bus = {};
 const _emit = (e,d) => (_bus[e]||[]).forEach(cb=>cb(d));
 const _on   = (e,cb) => { (_bus[e]=_bus[e]||[]).push(cb); };
@@ -75,7 +217,7 @@ window.OW = {
           cb({ name:c, id:c.toLowerCase() });
         }
       });
-      // background가 보내는 메시지 수신 (챔피언 선택 화면 / 소환사 정보)
+      // background가 보내는 메시지 수신 (챔피언 선택 화면 / 소환사 정보 / 게임 스냅샷)
       overwolf.windows.onMessageReceived.addListener(msg => {
         if (msg.id === 'champ_select' && msg.content?.championId) {
           _emit('champId', msg.content.championId);
@@ -86,12 +228,17 @@ window.OW = {
         if (msg.id === 'game_flow') {
           _emit('gameFlow', msg.content);
         }
+        // Task 9: background가 getInfo() 결과로 보내는 게임 스냅샷
+        if (msg.id === 'game_snapshot') {
+          _emit('gameSnapshot', msg.content || {});
+        }
       });
     } else { _on('champion', cb); }
   },
   onSummonerInfo(cb) { _on('summonerInfo', cb); },
   onChampId(cb)      { _on('champId', cb); },
   onGameFlow(cb)     { _on('gameFlow', cb); },
+  onGameSnapshot(cb) { _on('gameSnapshot', cb); },
   onKeyDown(cb) {
     if (IS_OW) {
       overwolf.games.inputTracking.onKeyDown.addListener(e =>
@@ -157,12 +304,14 @@ window.fetchChampionData = async (champName) => {
   }
 };
 
-window.fetchCombos = async (characterId) => {
-  const params = new URLSearchParams({ game: 'lol', character: characterId, limit: '20' });
-  const url = `https://combogg-web.vercel.app/api/combos?${params}`;
-  window._dbgPush(`[API] GET character=${characterId}`);
+window.fetchCombos = async (characterId, token) => {
+  const params = new URLSearchParams({ characterSlug: characterId });
+  const url = `https://combogg-web.vercel.app/api/combos/curated?${params}`;
+  window._dbgPush(`[API] GET curated character=${characterId}${token ? ' (auth)' : ' (no auth)'}`);
   try {
-    const r = await fetch(url);
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const r = await fetch(url, { headers });
     if (!r.ok) {
       window._dbgPush(`[API] HTTP ${r.status}`);
       return [];
@@ -172,7 +321,7 @@ window.fetchCombos = async (characterId) => {
                : Array.isArray(d.items) ? d.items
                : Array.isArray(d.combos) ? d.combos
                : [];
-    window._dbgPush(`[API] ${list.length}개 수신 (${characterId})`);
+    window._dbgPush(`[API] curated ${list.length}개 수신 (${characterId})`);
     return list.map(normalizeCombo);
   } catch(e) {
     window._dbgPush(`[API] 오류: ${e?.message || e}`);
@@ -225,38 +374,59 @@ function normalizeCombo(c) {
     inputs,
     steps: c.steps || [],
     game_specific: c.game_specific || c.gameSpecific || null,
+    source: c.source || null, // 'saved' | 'featured' | 'popular' (curated endpoint)
   };
 }
+
+// ── .tutfile Blob 생성 공유 헬퍼 ────────────────────────────────────
+// handleDownload 와 handleShare 양쪽에서 재사용
+// take 파라미터가 있으면 videoBytes를 ZIP에 포함
+window.buildTutfileBlob = ({ title, description, difficulty, tags, characterId, characterName, inputs, patch, take }) => {
+  const now = new Date().toISOString();
+  const durationMs = take?.durationMs
+    ?? (inputs.length ? inputs[inputs.length - 1].t + 200 : 0);
+  const manifest = {
+    version: '1.0', id: crypto.randomUUID(),
+    title,
+    description: description || '',
+    game: 'lol', character: characterId,
+    difficulty, tags: Array.isArray(tags) ? tags : [],
+    duration_ms: durationMs,
+    patch_version: patch || '15.1',
+    author: 'overlay', created_at: now,
+    // Task 9 → Task 8 wire-up: take.gameSnapshot가 있으면 game_specific으로 포함
+    game_specific: take?.gameSnapshot || {},
+  };
+  const inputsJson = {
+    inputs: inputs.map(inp => ({
+      t: Math.round(inp.t),
+      category: inp.key === 'AA' ? 'attack' : 'skill',
+      ref: inp.key === 'AA' ? undefined : `${characterName || ''}${inp.key}`,
+    })),
+  };
+  const stepsData = take?.steps?.length > 0 ? take.steps : [];
+  const stepsJson = { steps: stepsData };
+
+  const enc = new TextEncoder();
+  const files = {
+    'manifest.json': enc.encode(JSON.stringify(manifest, null, 2)),
+    'inputs.json':   enc.encode(JSON.stringify(inputsJson, null, 2)),
+    'steps.json':    enc.encode(JSON.stringify(stepsJson, null, 2)),
+  };
+
+  // take에 videoBytes가 있으면 video.mp4로 포함 (fflate는 Uint8Array를 직접 받음)
+  if (take?.videoBytes && take.videoBytes.byteLength > 0) {
+    files['video.mp4'] = take.videoBytes;
+  }
+
+  const zip = fflate.zipSync(files);
+  return new Blob([zip], { type: 'application/zip' });
+};
 
 // ── 녹화 .tutfile 로컬 다운로드 ───────────────────────────────────
 window.downloadTutfile = ({ title, difficulty, characterId, characterName, inputs, patch }) => {
   try {
-    const now = new Date().toISOString();
-    const manifest = {
-      version: '1.0', id: crypto.randomUUID(),
-      title, game: 'lol', character: characterId,
-      difficulty, tags: [],
-      duration_ms: inputs.length ? inputs[inputs.length - 1].t + 200 : 0,
-      patch_version: patch || '15.1',
-      author: 'overlay', created_at: now,
-      game_specific: {},
-    };
-    const inputsJson = {
-      inputs: inputs.map(inp => ({
-        t: Math.round(inp.t),
-        category: inp.key === 'AA' ? 'attack' : 'skill',
-        ref: inp.key === 'AA' ? undefined : `${characterName || ''}${inp.key}`,
-      })),
-    };
-    const stepsJson = { steps: [] };
-
-    const enc = new TextEncoder();
-    const zip = fflate.zipSync({
-      'manifest.json': enc.encode(JSON.stringify(manifest, null, 2)),
-      'inputs.json':   enc.encode(JSON.stringify(inputsJson, null, 2)),
-      'steps.json':    enc.encode(JSON.stringify(stepsJson, null, 2)),
-    });
-    const blob = new Blob([zip], { type: 'application/zip' });
+    const blob = window.buildTutfileBlob({ title, difficulty, characterId, characterName, inputs, patch });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -503,13 +673,35 @@ const ChampionWidget = ({ champion, patch }) => {
 
 // ── 2. 콤보 목록 ────────────────────────────────────────────────
 const DIFF_COLOR = { easy:'#00ffaa', medium:'#00d4ff', hard:'#ff3366' };
+const SOURCE_META = {
+  saved:    { icon:'🔖', label:'저장됨', color:'#ffc44d', bg:'rgba(255,196,77,0.14)',  border:'rgba(255,196,77,0.45)' },
+  featured: { icon:'⭐', label:'추천',   color:'#b780ff', bg:'rgba(183,128,255,0.14)', border:'rgba(183,128,255,0.45)' },
+  popular:  { icon:'🔥', label:'인기',   color:'#ff7a3d', bg:'rgba(255,122,61,0.14)',  border:'rgba(255,122,61,0.45)' },
+};
+const SourceBadge = ({ source }) => {
+  const meta = SOURCE_META[source];
+  if (!meta) return null;
+  return (
+    <span style={{
+      display:'inline-flex', alignItems:'center', gap:3,
+      padding:'2px 6px', borderRadius:10,
+      background: meta.bg, border:`1px solid ${meta.border}`,
+      fontSize:9, fontFamily:'monospace', fontWeight:700, letterSpacing:0.3,
+      color: meta.color, textShadow:`0 0 6px ${meta.color}`,
+      flexShrink:0, lineHeight:1.1, height:20,
+    }}>
+      <span style={{ fontSize:10, textShadow:'none' }}>{meta.icon}</span>
+      {meta.label}
+    </span>
+  );
+};
 const ComboQueueWidget = ({ combos, activeId, onSelect }) => (
   <div style={{ maxHeight:260, overflowY:'auto' }}>
     {combos.length === 0 && (
       <div style={{ padding:'16px 14px', fontFamily:'monospace', fontSize:11,
-        color:'rgba(255,255,255,0.35)', textAlign:'center', lineHeight:1.8 }}>
-        등록된 콤보 없음<br/>
-        <span style={{ color:'rgba(255,255,255,0.2)' }}>웹에서 콤보를 published 상태로 등록하세요</span>
+        color:'rgba(255,255,255,0.4)', textAlign:'center', lineHeight:1.8 }}>
+        이 챔피언의 콤보가 아직 없습니다.<br/>
+        <span style={{ color:'rgba(255,255,255,0.25)' }}>첫 콤보를 녹화해서 공유해보세요!</span>
       </div>
     )}
     {combos.map(c => {
@@ -522,8 +714,11 @@ const ComboQueueWidget = ({ combos, activeId, onSelect }) => (
           boxShadow: active ? 'inset 4px 0 12px rgba(0,180,255,0.08)' : 'none',
         }}>
           <div style={{ flex:1, minWidth:0 }}>
-            <div style={{ fontSize:13, fontWeight:600, color:active?'#fff':'rgba(255,255,255,0.8)', marginBottom:3, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
-              {c.title}
+            <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:3 }}>
+              {c.source && <SourceBadge source={c.source} />}
+              <div style={{ flex:1, minWidth:0, fontSize:13, fontWeight:600, color:active?'#fff':'rgba(255,255,255,0.8)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                {c.title}
+              </div>
             </div>
             <div style={{ display:'flex', gap:2, alignItems:'center', flexWrap:'nowrap', overflow:'hidden' }}>
               {c.inputs.slice(0,8).map((inp,i) => (
@@ -868,8 +1063,17 @@ const RunHistoryWidget = ({ runLog, playState }) => {
 };
 
 // ── 6. 녹화 테이크 로그 ──────────────────────────────────────────
-const RecordLogWidget = ({ takes, recordState, onSelectTake, onDeleteTake, selectedTakeId, onDownload, downloadState }) => {
-  if (takes.length === 0 && recordState === 'idle') return (
+const RecordLogWidget = ({ takes, practiceRuns = [], recordState, onSelectTake, onDeleteTake, selectedTakeId, onDownload, downloadState, onShare, onPreview }) => {
+  const [moreOpen, setMoreOpen] = useState(false);
+  // 위젯 외부 클릭으로 메뉴 닫기
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onDocClick = () => setMoreOpen(false);
+    window.addEventListener('click', onDocClick);
+    return () => window.removeEventListener('click', onDocClick);
+  }, [moreOpen]);
+
+  if (takes.length === 0 && practiceRuns.length === 0 && recordState === 'idle') return (
     <div style={{ padding:'14px', fontFamily:'monospace', fontSize:11, color:'rgba(255,255,255,0.3)', textAlign:'center' }}>
       F11로 녹화 시작
     </div>
@@ -877,6 +1081,11 @@ const RecordLogWidget = ({ takes, recordState, onSelectTake, onDeleteTake, selec
 
   const REC_COLOR = '#ff3366';
   const fmt = ms => `${(ms / 1000).toFixed(1)}s`;
+  const fmtTs = ts => {
+    const d = new Date(ts);
+    const pad = n => String(n).padStart(2, '0');
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  };
 
   return (
     <div style={{ padding:'8px 12px 12px' }}>
@@ -895,34 +1104,52 @@ const RecordLogWidget = ({ takes, recordState, onSelectTake, onDeleteTake, selec
         </div>
       )}
 
-      {/* 테이크 목록 */}
+      {/* 테이크 목록 — 스크롤 가능 */}
       {takes.length > 0 && (
         <div style={{ marginBottom:8 }}>
           <div style={{ fontFamily:'monospace', fontSize:10, letterSpacing:1.5, fontWeight:700,
             color:'rgba(255,255,255,0.5)', marginBottom:6 }}>테이크</div>
-          <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
+          <div style={{ display:'flex', flexDirection:'column', gap:3, maxHeight:320, overflowY:'auto' }}>
             {[...takes].reverse().map(tk => {
               const sel = tk.id === selectedTakeId;
+              const keys = tk.inputs.map(i => i.key).filter(Boolean);
+              const KEY_LIMIT = 14;
+              const shownKeys = keys.slice(0, KEY_LIMIT);
+              const hiddenCount = Math.max(0, keys.length - KEY_LIMIT);
               return (
                 <div key={tk.id} onClick={() => onSelectTake(tk.id)}
                   style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 8px', cursor:'pointer',
                     borderRadius:6, border:`1px solid ${sel ? 'rgba(0,200,255,0.5)' : 'rgba(255,255,255,0.07)'}`,
                     background: sel ? 'rgba(0,200,255,0.08)' : 'rgba(255,255,255,0.02)',
-                    transition:'all 0.12s' }}>
+                    transition:'all 0.12s', minHeight: 28 }}>
                   <span style={{ fontFamily:'monospace', fontSize:10, color:'rgba(255,255,255,0.4)', flexShrink:0 }}>
                     #{tk.idx}
                   </span>
-                  <span style={{ fontFamily:'monospace', fontSize:11, fontWeight:700,
-                    color: sel ? '#00d4ff' : 'rgba(255,255,255,0.7)', flex:1 }}>
+                  <span style={{ fontFamily:'monospace', fontSize:10, fontWeight:700,
+                    color: sel ? '#00d4ff' : 'rgba(255,255,255,0.55)', flexShrink:0 }}>
                     {fmt(tk.durationMs)}
                   </span>
-                  <span style={{ fontFamily:'monospace', fontSize:10, color:'rgba(255,255,255,0.45)' }}>
-                    {tk.inputs.length}입력
-                  </span>
+                  <div style={{ flex:1, display:'flex', alignItems:'center', gap:3, flexWrap:'nowrap', overflow:'hidden' }}>
+                    {shownKeys.map((k, i) => (
+                      <span key={i} style={{
+                        fontFamily:'monospace', fontSize:10, fontWeight:700,
+                        color: sel ? 'rgba(0,212,255,0.95)' : 'rgba(255,255,255,0.78)',
+                        background: sel ? 'rgba(0,200,255,0.12)' : 'rgba(255,255,255,0.06)',
+                        padding:'1px 4px', borderRadius:3, lineHeight:1.4,
+                        flexShrink:0,
+                      }}>{k}</span>
+                    ))}
+                    {hiddenCount > 0 && (
+                      <span style={{ fontFamily:'monospace', fontSize:9, color:'rgba(255,255,255,0.35)', flexShrink:0 }}>
+                        +{hiddenCount}
+                      </span>
+                    )}
+                  </div>
                   <div onPointerDown={e => e.stopPropagation()}
                     onClick={e => { e.stopPropagation(); onDeleteTake(tk.id); }}
-                    style={{ cursor:'pointer', fontSize:13, color:'rgba(255,80,100,0.6)',
-                      padding:'0 4px', lineHeight:1, userSelect:'none' }}>×</div>
+                    style={{ cursor:'pointer', fontSize:11, color:'rgba(255,80,100,0.45)',
+                      padding:'0 4px', lineHeight:1, userSelect:'none', flexShrink:0 }}
+                    title="삭제">×</div>
                 </div>
               );
             })}
@@ -930,7 +1157,46 @@ const RecordLogWidget = ({ takes, recordState, onSelectTake, onDeleteTake, selec
         </div>
       )}
 
-      {/* 선택된 테이크 → 다운로드 */}
+      {/* 연습 기록 — F9 미리보기/연습 완료시 score 누적 */}
+      <div style={{ marginBottom:8, borderTop: takes.length > 0 ? '1px solid rgba(255,255,255,0.07)' : 'none', paddingTop: takes.length > 0 ? 8 : 0 }}>
+        <div style={{ fontFamily:'monospace', fontSize:10, letterSpacing:1.5, fontWeight:700,
+          color:'rgba(255,255,255,0.5)', marginBottom:6 }}>연습 기록</div>
+        {practiceRuns.length === 0 ? (
+          <div style={{ fontFamily:'monospace', fontSize:10, color:'rgba(255,255,255,0.25)',
+            padding:'4px 0', textAlign:'center' }}>
+            연습 기록 없음
+          </div>
+        ) : (
+          <div style={{ display:'flex', flexDirection:'column', gap:3, maxHeight:320, overflowY:'auto' }}>
+            {practiceRuns.map(pr => {
+              const score = Number.isFinite(pr.score) ? Math.round(pr.score) : 0;
+              const scoreColor = score >= 90 ? '#00ff88' : score >= 70 ? '#00d4ff' : score >= 40 ? '#ffcc00' : '#ff6b6b';
+              return (
+                <div key={pr.id}
+                  style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 8px',
+                    borderRadius:6, border:'1px solid rgba(255,255,255,0.07)',
+                    background:'rgba(255,255,255,0.02)' }}>
+                  <span style={{ fontFamily:'monospace', fontSize:10, color:'rgba(255,255,255,0.4)', flexShrink:0 }}>
+                    {fmtTs(pr.ts)}
+                  </span>
+                  <span style={{ fontFamily:'monospace', fontSize:11, fontWeight:600,
+                    color:'rgba(255,255,255,0.7)', flex:1, overflow:'hidden', textOverflow:'ellipsis',
+                    whiteSpace:'nowrap' }}>
+                    {pr.comboTitle || '—'}
+                  </span>
+                  <span style={{ fontFamily:'monospace', fontSize:10, fontWeight:700,
+                    color: scoreColor, padding:'1px 6px', borderRadius:4,
+                    background:`${scoreColor}1a`, border:`1px solid ${scoreColor}55` }}>
+                    {score}점
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 선택된 테이크 → 다운로드 + 공유 */}
       {selectedTakeId && (
         <div style={{ borderTop:'1px solid rgba(255,255,255,0.07)', paddingTop:8 }}>
           {downloadState ? (
@@ -938,15 +1204,78 @@ const RecordLogWidget = ({ takes, recordState, onSelectTake, onDeleteTake, selec
               {downloadState}
             </div>
           ) : (
-            <div onPointerDown={e => e.stopPropagation()}
-              onClick={onDownload}
-              style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:8,
-                padding:'8px', borderRadius:6, cursor:'pointer', userSelect:'none',
-                background:'linear-gradient(135deg,rgba(0,100,255,0.25),rgba(0,200,255,0.15))',
-                border:'1px solid rgba(0,200,255,0.5)',
-                color:'#00d4ff', fontFamily:'monospace', fontSize:12, fontWeight:700,
-                boxShadow:'0 0 12px rgba(0,200,255,0.2)' }}>
-              ↓ 파일 저장 + 웹 업로드
+            <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
+              {/* 미리보기 버튼 — 입력이 없으면 비활성 */}
+              {(() => {
+                const selectedTake = takes.find(t => t.id === selectedTakeId);
+                const hasInputs = selectedTake && selectedTake.inputs.length > 0;
+                return (
+                  <div onPointerDown={e => e.stopPropagation()}
+                    onClick={() => {
+                      if (!hasInputs) return;
+                      if (selectedTake) onPreview(selectedTake);
+                    }}
+                    style={{ display:'flex', alignItems:'center', justifyContent:'center', gap:6,
+                      padding:'8px', borderRadius:6,
+                      cursor: hasInputs ? 'pointer' : 'not-allowed', userSelect:'none',
+                      background: hasInputs
+                        ? 'linear-gradient(135deg,rgba(0,180,80,0.3),rgba(0,255,130,0.15))'
+                        : 'rgba(255,255,255,0.03)',
+                      border: `1px solid ${hasInputs ? 'rgba(0,220,100,0.55)' : 'rgba(255,255,255,0.1)'}`,
+                      color: hasInputs ? '#00ff88' : 'rgba(255,255,255,0.2)',
+                      fontFamily:'monospace', fontSize:12, fontWeight:700,
+                      boxShadow: hasInputs ? '0 0 10px rgba(0,220,100,0.2)' : 'none',
+                      opacity: hasInputs ? 1 : 0.5 }}>
+                    ▶ 미리보기
+                  </div>
+                );
+              })()}
+              {/* 공유하기 (primary) + ... (more menu) */}
+              <div style={{ display:'flex', gap:6, position:'relative' }}>
+                <div onPointerDown={e => e.stopPropagation()}
+                  onClick={() => {
+                    const take = takes.find(t => t.id === selectedTakeId);
+                    if (take) onShare(take);
+                  }}
+                  style={{ flex:1, display:'flex', alignItems:'center', justifyContent:'center', gap:6,
+                    padding:'8px', borderRadius:6, cursor:'pointer', userSelect:'none',
+                    background:'linear-gradient(135deg,rgba(60,40,200,0.35),rgba(100,60,255,0.2))',
+                    border:'1px solid rgba(100,80,255,0.6)',
+                    color:'#a78bfa', fontFamily:'monospace', fontSize:12, fontWeight:700,
+                    boxShadow:'0 0 12px rgba(100,80,255,0.25)' }}>
+                  공유하기 (브라우저로)
+                </div>
+                <div onPointerDown={e => e.stopPropagation()}
+                  onClick={e => { e.stopPropagation(); setMoreOpen(v => !v); }}
+                  title="추가 옵션"
+                  style={{ width:34, display:'flex', alignItems:'center', justifyContent:'center',
+                    padding:'8px 0', borderRadius:6, cursor:'pointer', userSelect:'none',
+                    background:'rgba(255,255,255,0.04)',
+                    border:'1px solid rgba(255,255,255,0.15)',
+                    color:'rgba(255,255,255,0.6)', fontFamily:'monospace', fontSize:14, fontWeight:700,
+                    lineHeight:1 }}>
+                  ⋯
+                </div>
+                {moreOpen && (
+                  <div onPointerDown={e => e.stopPropagation()}
+                    onClick={e => e.stopPropagation()}
+                    style={{ position:'absolute', right:0, top:'calc(100% + 4px)',
+                      minWidth:160, zIndex:50,
+                      background:'rgba(8,12,30,0.97)',
+                      border:'1px solid rgba(0,190,255,0.35)',
+                      borderRadius:6, padding:'4px',
+                      boxShadow:'0 8px 24px rgba(0,0,0,0.6), 0 0 16px rgba(0,120,255,0.15)' }}>
+                    <div onClick={() => { setMoreOpen(false); onDownload(); }}
+                      style={{ padding:'7px 10px', borderRadius:4, cursor:'pointer',
+                        fontFamily:'monospace', fontSize:11, color:'#00d4ff',
+                        userSelect:'none' }}
+                      onMouseEnter={e => e.currentTarget.style.background='rgba(0,200,255,0.08)'}
+                      onMouseLeave={e => e.currentTarget.style.background='transparent'}>
+                      ↓ .tutfile 내보내기
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -1239,6 +1568,264 @@ const VideoWidget = ({ videoUrl, visible, defaultPos, scale }) => {
   );
 };
 
+// ── 공유 상태 표시 (Draft 업로드 → 브라우저 편집) ────────────────────
+// shareState statuses:
+//   idle | waiting-video | awaiting-token | uploading | done | token-expired | error
+// 게임 입력 충돌 회피를 위해 오버레이 내 폼은 제거. 자동 메타데이터로 draft 업로드 후
+// 브라우저로 /combos/[id]/edit 페이지를 열어 사용자가 거기서 편집·게시한다.
+const ShareStatus = ({ shareState, onClose, onTokenConfirm, onRetry }) => {
+  const [pastedToken, setPastedToken] = React.useState('');
+
+  // awaiting-token 상태가 풀리면 입력값 비우기
+  React.useEffect(() => {
+    if (shareState?.status !== 'awaiting-token') setPastedToken('');
+  }, [shareState?.status]);
+
+  if (!shareState || shareState.status === 'idle') return null;
+  const { status, progress, error, editUrl } = shareState;
+
+  // 작은 플로팅 카드 (전체 화면 모달 대신 — 게임 입력 차단을 최소화)
+  const cardWrap = {
+    position:'fixed', top:20, right:20,
+    zIndex:1000, pointerEvents:'auto',
+    maxWidth:340,
+  };
+  const boxStyle = {
+    background:'rgba(8,12,30,0.97)',
+    border:'1.5px solid rgba(100,80,255,0.5)',
+    borderRadius:10,
+    boxShadow:'0 0 28px rgba(100,80,255,0.25), 0 12px 32px rgba(0,0,0,0.7)',
+    padding:'14px 16px',
+    color:'#fff',
+    position:'relative',
+  };
+  const closeBtn = (
+    <div onClick={onClose} style={{
+      position:'absolute', top:6, right:9, cursor:'pointer',
+      fontSize:16, color:'rgba(255,255,255,0.45)', lineHeight:1,
+      userSelect:'none',
+    }}>×</div>
+  );
+  const titleStyle = (color) => ({
+    fontFamily:'monospace', fontSize:12, fontWeight:700,
+    color, marginBottom:8, letterSpacing:1,
+  });
+  const bodyStyle = {
+    fontSize:12, color:'rgba(255,255,255,0.72)',
+    lineHeight:1.6, marginBottom:10,
+  };
+  const btnRow = { display:'flex', gap:6 };
+  const btnPrimary = {
+    flex:1, padding:'7px 8px', borderRadius:5, cursor:'pointer', textAlign:'center',
+    background:'linear-gradient(135deg,rgba(60,40,200,0.5),rgba(100,60,255,0.3))',
+    border:'1px solid rgba(100,80,255,0.7)',
+    color:'#a78bfa', fontFamily:'monospace', fontSize:11, fontWeight:700,
+    userSelect:'none',
+  };
+  const btnGhost = {
+    flex:1, padding:'7px 8px', borderRadius:5, cursor:'pointer', textAlign:'center',
+    background:'rgba(255,255,255,0.04)',
+    border:'1px solid rgba(255,255,255,0.12)',
+    color:'rgba(255,255,255,0.55)', fontFamily:'monospace', fontSize:11,
+    userSelect:'none',
+  };
+
+  if (status === 'waiting-video') {
+    return (
+      <div style={cardWrap}>
+        <div style={boxStyle}>
+          {closeBtn}
+          <div style={titleStyle('#00d4ff')}>비디오 처리 중…</div>
+          <div style={bodyStyle}>리플레이 캡처 마무리 중 (최대 15초)</div>
+          <div style={btnRow}>
+            <div onClick={onClose} style={btnGhost}>취소</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === 'awaiting-token') {
+    return (
+      <div style={cardWrap}>
+        <div style={boxStyle}>
+          {closeBtn}
+          <div style={titleStyle('#a78bfa')}>로그인 필요</div>
+          <div style={bodyStyle}>
+            브라우저에서 ComboGG 로그인 후 토큰을 복사해 붙여넣기 하세요.
+          </div>
+          <input
+            type="text"
+            value={pastedToken}
+            onChange={e => setPastedToken(e.target.value)}
+            placeholder="토큰 붙여넣기..."
+            style={{
+              width:'100%', padding:'7px 9px', borderRadius:5,
+              background:'rgba(255,255,255,0.06)',
+              border:'1px solid rgba(100,80,255,0.4)',
+              color:'#fff', fontFamily:'monospace', fontSize:11,
+              outline:'none', marginBottom:8, boxSizing:'border-box',
+            }}
+          />
+          <div style={btnRow}>
+            <div onClick={() => {
+              const t = (pastedToken || '').trim();
+              if (t) onTokenConfirm(t);
+            }} style={btnPrimary}>확인</div>
+            <div onClick={onClose} style={btnGhost}>취소</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === 'uploading') {
+    return (
+      <div style={cardWrap}>
+        <div style={boxStyle}>
+          {closeBtn}
+          <div style={titleStyle('#a78bfa')}>업로드 중…</div>
+          <div style={{ height:5, background:'rgba(255,255,255,0.08)', borderRadius:3, overflow:'hidden', marginBottom:6 }}>
+            <div style={{
+              height:'100%', width:`${progress || 0}%`,
+              background:'linear-gradient(90deg,rgba(60,40,200,0.9),rgba(140,100,255,0.9))',
+              borderRadius:3, transition:'width 0.3s ease',
+            }} />
+          </div>
+          <div style={{ fontFamily:'monospace', fontSize:10, color:'rgba(255,255,255,0.5)', textAlign:'center' }}>
+            {progress || 0}%
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === 'done') {
+    return (
+      <div style={cardWrap}>
+        <div style={boxStyle}>
+          {closeBtn}
+          <div style={titleStyle('#00ffaa')}>✓ 임시저장 완료!</div>
+          <div style={bodyStyle}>
+            브라우저에서 편집해주세요.<br/>
+            창이 닫혀있으면 [다시 열기]를 누르세요.
+          </div>
+          <div style={btnRow}>
+            <div onClick={() => {
+              if (!editUrl) return;
+              if (IS_OW) overwolf.utils.openUrlInBrowser(editUrl);
+              else window.open(editUrl, '_blank');
+            }} style={{
+              ...btnPrimary,
+              background:'linear-gradient(135deg,rgba(0,100,80,0.4),rgba(0,200,140,0.2))',
+              border:'1px solid rgba(0,200,140,0.5)',
+              color:'#00ffaa',
+            }}>
+              다시 열기
+            </div>
+            <div onClick={onClose} style={btnGhost}>닫기</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === 'token-expired') {
+    return (
+      <div style={cardWrap}>
+        <div style={boxStyle}>
+          {closeBtn}
+          <div style={titleStyle('#ffaa44')}>토큰 만료</div>
+          <div style={bodyStyle}>토큰이 만료되었습니다. 다시 로그인해주세요.</div>
+          <div style={btnRow}>
+            <div onClick={onRetry} style={btnPrimary}>다시 로그인</div>
+            <div onClick={onClose} style={btnGhost}>취소</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (status === 'error') {
+    return (
+      <div style={cardWrap}>
+        <div style={boxStyle}>
+          {closeBtn}
+          <div style={titleStyle('#ff5577')}>업로드 오류</div>
+          <div style={bodyStyle}>{error || '알 수 없는 오류가 발생했습니다.'}</div>
+          <div style={btnRow}>
+            <div onClick={onRetry} style={{
+              ...btnPrimary,
+              background:'linear-gradient(135deg,rgba(200,40,60,0.35),rgba(255,60,80,0.2))',
+              border:'1px solid rgba(255,60,80,0.5)',
+              color:'#ff7090',
+            }}>
+              다시 시도
+            </div>
+            <div onClick={onClose} style={btnGhost}>취소</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+};
+
+// ── 자동 스텝 감지 — 녹화 정지 시 입력 간격으로 스텝 분할 ────────────
+function autoDetectSteps(inputs, durationMs, gapThreshold = 400) {
+  if (!inputs || inputs.length < 2) return [];
+  const boundaries = [0];
+  for (let i = 1; i < inputs.length; i++) {
+    if (inputs[i].t - inputs[i - 1].t >= gapThreshold) {
+      boundaries.push(inputs[i].t);
+    }
+  }
+  if (boundaries.length === 1) return []; // no gaps found, no steps
+  return boundaries.map((start, i) => ({
+    start,
+    end: boundaries[i + 1] ?? durationMs,
+    title: `Step ${i + 1}`,
+    tip: ''
+  }));
+}
+
+// ── 디버그 패널 (드래그 가능, 우측 중간 기본 위치) ─────────────────
+const DebugPanelDraggable = ({ children }) => {
+  const [pos, setPos] = useState(() => ({
+    x: Math.max(20, window.innerWidth - 400),
+    y: Math.round(window.innerHeight * 0.30),
+  }));
+  const onPointerDown = useCallback((e) => {
+    if (!e.target.closest('.debug-handle')) return;
+    const startX = e.clientX, startY = e.clientY;
+    const startPX = pos.x, startPY = pos.y;
+    const onMove = ev => setPos({
+      x: Math.round(startPX + (ev.clientX - startX)),
+      y: Math.round(startPY + (ev.clientY - startY)),
+    });
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    e.preventDefault();
+  }, [pos]);
+  return (
+    <div
+      onPointerDown={onPointerDown}
+      style={{
+        position:'fixed', left: pos.x, top: pos.y, width: 380, pointerEvents:'auto',
+        background:'rgba(0,0,0,0.88)', border:'1px solid rgba(255,200,0,0.4)', borderRadius:8,
+        fontFamily:'monospace', fontSize:11, color:'#ffe566', padding:'10px 12px', zIndex:999,
+      }}
+    >
+      {children}
+    </div>
+  );
+};
+
 // ── 메인 앱 ─────────────────────────────────────────────────────
 const App = () => {
   const [champion, setChampion] = useState(null);
@@ -1264,14 +1851,34 @@ const App = () => {
   const [widgetScale, setWidgetScale] = useState(0.80); // 전체 위젯 스케일
   const [debugLog, setDebugLog] = useState([]);
 
+  // ── 미리보기 state ─────────────────────────────────────────────
+  // previewCombo: 녹화 테이크로부터 만들어진 임시 콤보 객체. null이면 일반 연습 모드.
+  const [previewCombo, setPreviewCombo] = useState(null);
+  const previewComboRef = useRef(null);
+
   // ── 녹화 state ────────────────────────────────────────────────
   const [recordState, setRecordState] = useState('idle'); // 'idle' | 'recording'
   const [recordTakes, setRecordTakes] = useState([]);
   const [selectedTakeId, setSelectedTakeId] = useState(null);
+  const [practiceRuns, setPracticeRuns] = useState([]); // 연습 기록: { id, comboId, comboTitle, score, ts }
   const [downloadState, setDownloadState] = useState(null); // null | 문자열
+  const [stepFlash, setStepFlash] = useState(false); // F12 스텝 마커 시각 피드백 (미리보기 중)
+  // shareState: { status: 'idle'|'waiting-video'|'awaiting-token'|'uploading'|'done'|'token-expired'|'error',
+  //               take?, progress?, comboId?, editUrl?, error? }
+  const [shareState, setShareState] = useState({ status: 'idle' });
+  const shareStateRef = useRef({ status: 'idle' });
   const recordStartRef = useRef(null);
   const recordInputsRef = useRef([]);
   const recordIdxRef = useRef(0);
+  const desktopTokenRef = useRef(null); // JWT 토큰 (30일 유효), OW 런타임 퍼시스턴스용
+  const championRef = useRef(null); // 현재 챔피언 (async 콜백에서 최신 값 참조용)
+  const streamIdRef = useRef(null); // overwolf.streaming 활성 스트림 ID. null이면 녹화 안 함
+  const recordTakesRef = useRef([]); // recordTakes의 최신 값을 async 콜백에서 참조하기 위한 ref
+  // 녹화 카운트다운 (3-2-1 → REC) — 위젯 숨김 + 깨끗한 footage 확보
+  const [recordCountNum, setRecordCountNum] = useState(null);
+  const recordCountNumRef = useRef(null);
+  const recordCountIvRef = useRef(null);
+  useEffect(() => { recordCountNumRef.current = recordCountNum; }, [recordCountNum]);
   const addDebug = useCallback((msg) => {
     window._dbgPush(msg);
   }, []);
@@ -1280,6 +1887,46 @@ const App = () => {
   useEffect(() => {
     window._dbgCallback = (lines) => setDebugLog([...lines]);
     return () => { window._dbgCallback = null; };
+  }, []);
+
+  // ── 마운트 시 state.json 복원 + 리플레이 버퍼 초기화 ────────────────
+  useEffect(() => {
+    (async () => {
+      const saved = await readStateFile();
+      if (!saved) return;
+      if (Array.isArray(saved.takes) && saved.takes.length > 0) {
+        setRecordTakes(saved.takes);
+        // recordIdxRef를 저장된 최대 idx로 복원
+        const maxIdx = Math.max(...saved.takes.map(t => t.idx || 0));
+        recordIdxRef.current = maxIdx;
+        addDebug(`[IO] 테이크 ${saved.takes.length}개 복원 (최대 idx=${maxIdx})`);
+      }
+      if (saved.desktopToken) {
+        desktopTokenRef.current = saved.desktopToken;
+        addDebug('[IO] 데스크톱 토큰 복원됨');
+      }
+    })();
+
+    // ── Overwolf streaming API 사용 ─────────────────────────────────
+    // 이전에는 media.replays.turnOn으로 60초 ringbuffer 돌렸음 — 비효율적이라 제거.
+    // 이제 startRecord(카운트다운 끝) 시점에 streaming.start, stopRecord 시 streaming.stop.
+    // 시작/정지가 명확하므로 streaming API가 정답.
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── 토큰 퍼시스턴스 헬퍼 ────────────────────────────────────────
+  // saveDesktopToken: 토큰 저장 (state.json 업데이트)
+  const saveDesktopToken = useCallback(async (token) => {
+    desktopTokenRef.current = token;
+    await writeStateFile(recordTakes, token);
+    addDebug('[IO] 데스크톱 토큰 저장됨');
+  }, [recordTakes]);
+
+  // loadDesktopToken: state.json에서 토큰 읽기 (ref도 업데이트)
+  const loadDesktopToken = useCallback(async () => {
+    const saved = await readStateFile();
+    const token = saved?.desktopToken ?? null;
+    desktopTokenRef.current = token;
+    return token;
   }, []);
 
   const playRef        = useRef({ startTime:null, speed:1, playMs:0 });
@@ -1300,9 +1947,12 @@ const App = () => {
   const startRecordRef   = useRef(null);
   const stopRecordRef    = useRef(null);
   const cancelRecordRef  = useRef(null);
+  const cancelRecordCountdownRef = useRef(null); // 녹화 카운트다운 취소 (F11 또는 ESC)
   const masterKeyRef     = useRef(null);
+  const playStartTimeRef = useRef(null); // 미리보기 F12 스텝 마킹용 재생 시작 시각
 
-  const activeCombo = combos.find(c => c.id === activeId) || combos[0];
+  // 미리보기 중이면 previewCombo를, 아니면 선택된 콤보를 사용
+  const activeCombo = previewCombo || combos.find(c => c.id === activeId) || combos[0];
   const TOTAL = activeCombo?.duration_ms || 10000;
 
   // refs 동기화
@@ -1312,6 +1962,10 @@ const App = () => {
   useEffect(() => { activeComboRef.current = activeCombo; }, [activeCombo]);
   useEffect(() => { loopModeRef.current = loopMode; }, [loopMode]);
   useEffect(() => { scoreRef.current = score; }, [score]);
+  useEffect(() => { championRef.current = champion; }, [champion]);
+  useEffect(() => { recordTakesRef.current = recordTakes; }, [recordTakes]);
+  useEffect(() => { previewComboRef.current = previewCombo; }, [previewCombo]);
+  useEffect(() => { shareStateRef.current = shareState; }, [shareState]);
 
   // 콤보 선택 시 상세 API 호출 → videoUrl + game_specific
   // list API에는 두 필드가 없어서 선택할 때마다 상세를 한 번 더 가져옴
@@ -1338,7 +1992,7 @@ const App = () => {
     const c = { name, id: name.toLowerCase().replace(/\s+/g,'').replace(/[^a-z]/g,'') };
     setChampion(c);
     const [combosRes, champRes] = await Promise.all([
-      fetchCombos(c.id),
+      fetchCombos(c.id, desktopTokenRef.current),
       fetchChampionData(c.name),
     ]);
     if (combosRes.length) {
@@ -1347,7 +2001,7 @@ const App = () => {
     } else {
       setCombos([]);
       setActiveId(null);
-      addDebug(`[combos] 0개 — 웹에 등록된 콤보 없음 (published 상태 확인)`);
+      addDebug(`[combos] 0개 — 이 챔피언의 큐레이션 콤보 없음`);
     }
     if (champRes) { setPatch(champRes.patch); setChampData(champRes.champ); }
   }, []);
@@ -1552,6 +2206,22 @@ const App = () => {
 
   useEffect(() => { recordStateRef.current = recordState; }, [recordState]);
 
+  // stepFlash 자동 리셋 — 미리보기 F12 스텝 마킹 시각 피드백 400ms 후 해제
+  useEffect(() => {
+    if (!stepFlash) return;
+    const timer = setTimeout(() => setStepFlash(false), 400);
+    return () => clearTimeout(timer);
+  }, [stepFlash]);
+
+  // 재생 시작 시각 추적 — 미리보기 F12 스텝 마킹에 사용
+  useEffect(() => {
+    if (playState === 'playing') {
+      playStartTimeRef.current = performance.now();
+    } else {
+      playStartTimeRef.current = null;
+    }
+  }, [playState]);
+
   // 중앙 키 디스패처 — 매 렌더마다 갱신해 항상 최신 state/ref 참조
   // OW.onKeyDown(inputTracking)을 경유하므로 인게임 F8/F11/ESC 모두 캡처됨
   useEffect(() => {
@@ -1562,18 +2232,69 @@ const App = () => {
         return;
       }
       if (key === 'F11') {
+        // 카운트다운 중 F11 → 카운트다운 취소
+        if (recordCountNumRef.current !== null) {
+          window._dbgPush('[KEY] F11 → 카운트다운 취소');
+          cancelRecordCountdownRef.current?.();
+          return;
+        }
         if (recordStateRef.current === 'recording') {
           window._dbgPush('[KEY] F11 → 녹화 정지');
           stopRecordRef.current?.();
         } else {
-          window._dbgPush('[KEY] F11 → 녹화 시작');
+          window._dbgPush('[KEY] F11 → 녹화 시작 (3-2-1 카운트다운)');
           startRecordRef.current?.();
         }
         return;
       }
-      if (key === 'ESC' && recordStateRef.current === 'recording') {
-        window._dbgPush('[KEY] ESC → 녹화 취소');
-        cancelRecordRef.current?.();
+      if (key === 'ESC') {
+        if (recordCountNumRef.current !== null) {
+          window._dbgPush('[KEY] ESC → 카운트다운 취소');
+          cancelRecordCountdownRef.current?.();
+          return;
+        }
+        if (recordStateRef.current === 'recording') {
+          window._dbgPush('[KEY] ESC → 녹화 취소');
+          cancelRecordRef.current?.();
+          return;
+        }
+      }
+      if (key === 'F12' && previewComboRef.current && playStartTimeRef.current !== null) {
+        const elapsed = Math.round(performance.now() - playStartTimeRef.current);
+        window._dbgPush(`[KEY] F12 → 미리보기 스텝 마킹 @ ${elapsed}ms`);
+        // previewCombo의 id는 "preview_{takeId}" 형태
+        const takeId = previewComboRef.current.id.replace('preview_', '');
+        setRecordTakes(prev => prev.map(t => {
+          if (t.id !== takeId) return t;
+          const currentSteps = t.steps || [];
+          const boundaries = [0, ...currentSteps.map(s => s.start).filter(s => s > 0), elapsed]
+            .filter((v, i, arr) => arr.indexOf(v) === i) // deduplicate
+            .sort((a, b) => a - b);
+          const newSteps = boundaries.map((start, i) => ({
+            start,
+            end: boundaries[i + 1] ?? t.durationMs,
+            title: `Step ${i + 1}`,
+            tip: ''
+          }));
+          return { ...t, steps: newSteps };
+        }));
+        setPreviewCombo(prev => {
+          if (!prev) return prev;
+          const currentSteps = prev.steps || [];
+          const boundaries = [0, ...currentSteps.map(s => s.start).filter(s => s > 0), elapsed]
+            .filter((v, i, arr) => arr.indexOf(v) === i)
+            .sort((a, b) => a - b);
+          return {
+            ...prev,
+            steps: boundaries.map((start, i) => ({
+              start,
+              end: boundaries[i + 1] ?? prev.duration_ms,
+              title: `Step ${i + 1}`,
+              tip: ''
+            }))
+          };
+        });
+        setStepFlash(true);
         return;
       }
       if (key === 'F1') { setShow(p => ({ ...p, champion: !p.champion })); return; }
@@ -1621,7 +2342,16 @@ const App = () => {
   useEffect(() => {
     togglePlayRef.current = () => {
       if (playStateRef.current === 'idle') startCountdown();
-      else { cancelAnimationFrame(rafRef.current); setPlayState('idle'); }
+      else {
+        cancelAnimationFrame(rafRef.current);
+        setPlayState('idle');
+        // 미리보기 중 수동 정지 → 미리보기 모드 해제
+        if (previewComboRef.current) {
+          setPreviewCombo(null);
+          previewComboRef.current = null;
+          addDebug('[Preview] 수동 정지 — 일반 모드 복귀');
+        }
+      }
     };
   }, [playState]);
 
@@ -1630,23 +2360,166 @@ const App = () => {
   useEffect(() => {
     startRecordRef.current = () => {
       if (recordStateRef.current === 'recording') return;
-      recordStartRef.current = performance.now();
-      recordInputsRef.current = [];
-      setRecordState('recording');
-      setShow(prev => ({ ...prev, recordLog: true }));
-      window._dbgPush('[REC] 녹화 시작');
+      if (recordCountNumRef.current !== null) return; // 이미 카운트다운 중
+      // 1) 카운트다운 시작 (3 → 2 → 1 → REC) — 위젯 자동 숨김
+      window._dbgPush('[REC] 카운트다운 시작 — 위젯 숨김 → 깨끗한 footage 확보');
+      setRecordCountNum(3);
+      let n = 3;
+      recordCountIvRef.current = setInterval(() => {
+        n--;
+        setRecordCountNum(n);
+        if (n <= 0) {
+          clearInterval(recordCountIvRef.current);
+          recordCountIvRef.current = null;
+          // 2) 실제 녹화 시작
+          recordStartRef.current = performance.now();
+          recordInputsRef.current = [];
+          setRecordState('recording');
+          setShow(prev => ({ ...prev, recordLog: false })); // 녹화 중에는 로그도 숨김 — 영상 깨끗하게
+          window._dbgPush('[REC] 녹화 시작');
+          // streaming API로 동영상 녹화 시작 — 시작/정지 정확
+          if (IS_OW && overwolf.streaming && overwolf.streaming.start) {
+            const settings = {
+              provider: overwolf.streaming.enums.StreamingProvider.VideoRecorder,
+              settings: {
+                audio: { mic: { enable: false }, game: { enable: true } },
+                video: {
+                  auto_calc_kbps: true,
+                  fps: 30,
+                  width: 0, height: 0, // 0 = 게임 해상도 자동
+                  buffer_length: 0, // 과거 버퍼 사용 안 함
+                  sub_folder_name: 'ComboGG',
+                }
+              }
+            };
+            overwolf.streaming.start(settings, (res) => {
+              if (res && res.success && (res.stream_id !== undefined && res.stream_id !== null)) {
+                streamIdRef.current = res.stream_id;
+                window._dbgPush('[stream] 시작 OK, id=' + res.stream_id);
+              } else {
+                streamIdRef.current = null;
+                window._dbgPush('[stream] 시작 실패: ' + (res?.error || JSON.stringify(res)));
+              }
+            });
+          }
+          // 'REC' 인디케이터 잠깐 더 보여주고 사라짐 (애니메이션)
+          setTimeout(() => setRecordCountNum(null), 600);
+        }
+      }, 1000);
+    };
+    cancelRecordCountdownRef.current = () => {
+      if (recordCountIvRef.current) {
+        clearInterval(recordCountIvRef.current);
+        recordCountIvRef.current = null;
+      }
+      setRecordCountNum(null);
+      // 카운트다운 끝나기 전 취소면 streaming은 아직 시작 안 됨 (start은 카운트다운 끝에서 호출됨).
+      // 만약 race로 시작됐다면 stop 시도 — 결과 무시 (cleanup만)
+      if (streamIdRef.current !== null && IS_OW && overwolf.streaming) {
+        const sid = streamIdRef.current;
+        streamIdRef.current = null;
+        overwolf.streaming.stop(sid, () => {});
+      }
+      window._dbgPush('[REC] 카운트다운 취소');
     };
     stopRecordRef.current = () => {
       if (recordStateRef.current !== 'recording') return;
       const durationMs = Math.round(performance.now() - recordStartRef.current);
       const inputs = [...recordInputsRef.current];
+      const steps = autoDetectSteps(inputs, durationMs);
       recordIdxRef.current += 1;
-      const take = { id: crypto.randomUUID(), idx: recordIdxRef.current, inputs, durationMs };
-      setRecordTakes(prev => [...prev, take]);
+      const take = { id: crypto.randomUUID(), idx: recordIdxRef.current, inputs, durationMs, steps };
+      setRecordTakes(prev => {
+        const next = [...prev, take];
+        // 테이크 추가 직후 state.json에 저장
+        writeStateFile(next, desktopTokenRef.current);
+        return next;
+      });
       setSelectedTakeId(take.id);
       setRecordState('idle');
+      setShow(prev => ({ ...prev, recordLog: true }));
       setDownloadState(null);
       window._dbgPush(`[REC] 정지 — ${inputs.length}입력 ${(durationMs/1000).toFixed(1)}s`);
+
+      // ── 영상 정지 — overwolf.streaming.stop으로 녹화 종료 ──────────────
+      if (IS_OW && streamIdRef.current !== null && overwolf.streaming) {
+        const sid = streamIdRef.current;
+        streamIdRef.current = null;
+        overwolf.streaming.stop(sid, (res) => {
+          if (res && res.success) {
+            const path = res.file_path || res.url || res.path || res.media_url;
+            if (!path) {
+              window._dbgPush('[stream] 정지됐지만 파일 경로 없음: ' + JSON.stringify(res));
+              return;
+            }
+            window._dbgPush('[stream] 정지 OK, 파일=' + path);
+            // 파일을 바이트 배열로 읽어 take.videoBytes에 패치
+            overwolf.io.readBinaryFile(path, {}, ({ success: readOk, content, error }) => {
+              if (readOk && content) {
+                const videoBytes = new Uint8Array(content);
+                setRecordTakes(prev => prev.map(t =>
+                  t.id === take.id ? { ...t, videoBytes } : t
+                ));
+                window._dbgPush(`[stream] video attached to take ${take.id}, ${videoBytes.byteLength} bytes`);
+              } else {
+                window._dbgPush(`[stream] readBinaryFile failed: ${error || 'no content'} (path: ${path})`);
+              }
+            });
+          } else {
+            window._dbgPush('[stream] 정지 실패: ' + (res?.error || JSON.stringify(res)));
+          }
+        });
+      } else if (IS_OW && streamIdRef.current === null) {
+        window._dbgPush('[stream] 활성 stream 없음 — 시작 시 실패했거나 streaming API 미지원');
+      }
+
+      // ── Task 9: 게임 상태 스냅샷 요청 → take.gameSnapshot에 비동기 패치 ──
+      // background에 'request_snapshot' 메시지 전송 → background가 getInfo() 호출 후
+      // 'game_snapshot' 메시지로 회신 → 여기서 받아서 parseLolSnapshot() 후 take 패치
+      if (IS_OW) {
+        const requestId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : `snap-${Date.now()}-${Math.random()}`;
+        let handled = false;
+        const onSnap = (payload) => {
+          if (handled) return;
+          handled = true;
+          const rawSnapshot = payload?.snapshot;
+          // 디버그: 실제 OW가 주는 raw 구조 확인 (아이템 등 필드 경로 검증용)
+          try {
+            const rawStr = JSON.stringify(rawSnapshot).slice(0, 1500);
+            window._dbgPush('[snapshot-raw] ' + rawStr);
+          } catch(e) {}
+          const gameSnapshot = parseLolSnapshot(rawSnapshot);
+          window._dbgPush('[snapshot-parsed] level=' + gameSnapshot?.required_level + ' items=' + JSON.stringify(gameSnapshot?.required_items) + ' summoners=' + JSON.stringify(gameSnapshot?.summoner_spells));
+          setRecordTakes(prev => {
+            const next = prev.map(t =>
+              t.id === take.id ? { ...t, gameSnapshot } : t
+            );
+            // gameSnapshot은 JSON 직렬화 가능 → state.json에 즉시 영속화
+            writeStateFile(next, desktopTokenRef.current);
+            return next;
+          });
+          window._dbgPush(`[snapshot] attached to take ${take.id} — ${gameSnapshot ? 'ok' : 'null'}`);
+        };
+        // 일회성 리스너 (window.OW 버스에 등록 — 후속 take는 자체 리스너로 처리)
+        window.OW.onGameSnapshot(onSnap);
+        // 응답이 안 오는 경우 30초 후 정리 (handled 플래그로 한 번만 처리)
+        setTimeout(() => {
+          if (!handled) {
+            handled = true;
+            window._dbgPush(`[snapshot] timeout for take ${take.id}`);
+          }
+        }, 30000);
+        // background로 요청 전송
+        overwolf.windows.obtainDeclaredWindow('background', r => {
+          if (r.success) {
+            overwolf.windows.sendMessage(r.window.id, 'request_snapshot', { requestId }, () => {});
+          } else {
+            window._dbgPush('[snapshot] obtainDeclaredWindow background 실패');
+          }
+        });
+      }
     };
     cancelRecordRef.current = () => {
       if (recordStateRef.current !== 'recording') return;
@@ -1677,6 +2550,193 @@ const App = () => {
       setTimeout(() => setDownloadState(null), 4000);
     }
   }, [recordTakes, selectedTakeId, champion, patch]);
+
+  // ── 공유 흐름 (Draft 업로드 → 브라우저 편집) ─────────────────────────────
+  // 폼은 게임 입력과 충돌해서 오버레이 안에서 쓸 수 없음. 자동 메타데이터로
+  // draft 콤보를 만들고 브라우저로 /combos/[id]/edit 페이지를 열어 거기서 편집한다.
+  const handleShare = useCallback(async (take) => {
+    if (!take) return;
+    const champ = championRef.current;
+
+    // Phase 1 — 비디오 바이트 대기 (최대 15초)
+    setShareState({ status: 'waiting-video', take });
+    const startWait = Date.now();
+    let workingTake = take;
+    while (Date.now() - startWait < 15000) {
+      const fresh = recordTakesRef.current.find(t => t.id === take.id) || take;
+      if (fresh.videoBytes && fresh.videoBytes.byteLength > 0) {
+        workingTake = fresh;
+        break;
+      }
+      // 사용자가 취소(닫기/다른 take 선택)한 경우 중단
+      const cur = shareStateRef.current;
+      if (!cur || cur.status === 'idle' || cur.take?.id !== take.id) return;
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    if (!workingTake.videoBytes || workingTake.videoBytes.byteLength === 0) {
+      setShareState({ status: 'error', take, error: '비디오 캡처 실패. 다시 녹화해주세요.' });
+      return;
+    }
+
+    // Phase 2 — 토큰 확인 (없으면 브라우저로 desktop-login 열고 awaiting-token)
+    let token = desktopTokenRef.current;
+    if (!token) {
+      const loginUrl = 'https://combogg-web.vercel.app/desktop-login';
+      if (IS_OW) overwolf.utils.openUrlInBrowser(loginUrl);
+      else window.open(loginUrl, '_blank');
+      setShareState({ status: 'awaiting-token', take: workingTake });
+      return;
+    }
+
+    // Phase 3 — 자동 메타데이터로 draft 업로드
+    const autoTitle = `${champ?.name || 'LoL'} 콤보 ${new Date().toLocaleString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`;
+
+    try {
+      setShareState({ status: 'uploading', take: workingTake, progress: 10 });
+      addDebug(`[Share] video ${workingTake.videoBytes.byteLength}bytes, draft 업로드 시작`);
+
+      const tutfileBlob = window.buildTutfileBlob({
+        title: autoTitle,
+        description: '',
+        difficulty: 'medium',
+        tags: [],
+        characterId: champ?.id || 'unknown',
+        characterName: champ?.name || '',
+        inputs: workingTake.inputs,
+        patch,
+        take: workingTake,
+      });
+
+      // 1. presigned URL 발급
+      setShareState({ status: 'uploading', take: workingTake, progress: 30 });
+      const presignedRes = await fetch('https://combogg-web.vercel.app/api/uploads/presigned-url', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ bucket: 'tutfiles', filename: `${workingTake.id}.tutfile` }),
+      });
+
+      if (presignedRes.status === 401) {
+        await saveDesktopToken(null);
+        setShareState({ status: 'token-expired', take: workingTake });
+        return;
+      }
+      if (!presignedRes.ok) throw new Error(`presigned-url 실패 (HTTP ${presignedRes.status})`);
+
+      const { uploadUrl, path } = await presignedRes.json();
+
+      // 2. .tutfile 업로드 (Supabase Storage)
+      setShareState({ status: 'uploading', take: workingTake, progress: 60 });
+      const putRes = await fetch(uploadUrl, {
+        method: 'PUT',
+        body: tutfileBlob,
+        headers: { 'Content-Type': 'application/octet-stream' },
+      });
+      if (!putRes.ok) throw new Error(`스토리지 업로드 실패 (HTTP ${putRes.status})`);
+
+      // 3. 콤보 레코드 생성 (status='draft')
+      setShareState({ status: 'uploading', take: workingTake, progress: 85 });
+      const comboRes = await fetch('https://combogg-web.vercel.app/api/combos', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          tutfilePath: path,
+          title: autoTitle,
+          gameSlug: 'lol',
+          characterSlug: champ?.id || 'unknown',
+          difficulty: 'medium',
+          tags: [],
+          status: 'draft',
+          gameSpecific: workingTake.gameSnapshot || {},
+        }),
+      });
+
+      if (comboRes.status === 401) {
+        await saveDesktopToken(null);
+        setShareState({ status: 'token-expired', take: workingTake });
+        return;
+      }
+      if (!comboRes.ok) throw new Error(`콤보 생성 실패 (HTTP ${comboRes.status})`);
+
+      const { id: comboId } = await comboRes.json();
+
+      // 4. 브라우저로 편집 페이지 열기
+      const editUrl = `https://combogg-web.vercel.app/combos/${comboId}/edit`;
+      if (IS_OW) overwolf.utils.openUrlInBrowser(editUrl);
+      else window.open(editUrl, '_blank');
+
+      setShareState({ status: 'done', take: workingTake, comboId, editUrl });
+      addDebug(`[Share] draft 업로드 완료: ${comboId} → ${editUrl}`);
+
+    } catch (err) {
+      addDebug(`[Share] 오류: ${err?.message || err}`);
+      setShareState({
+        status: 'error',
+        take: workingTake,
+        error: err?.message || '알 수 없는 오류',
+      });
+    }
+  }, [patch, saveDesktopToken]);
+
+  // ── 미리보기 핸들러 ───────────────────────────────────────────
+  const handlePreview = useCallback((take) => {
+    if (!take || take.inputs.length === 0) return;
+
+    // take → 플레이백 엔진이 기대하는 콤보 형상으로 변환
+    // normalizeCombo와 동일한 형태: { id, title, difficulty, duration_ms, inputs, steps, game_specific }
+    // inputs 배열의 각 항목: { t, key, label }
+    const syntheticCombo = {
+      id: `preview_${take.id}`,
+      title: `미리보기 #${take.idx}`,
+      difficulty: 'medium',
+      duration_ms: take.durationMs,
+      inputs: take.inputs.map(inp => ({
+        t: inp.t,
+        key: inp.key,
+        label: inp.key === 'AA' ? '평타' : inp.key,
+      })),
+      steps: (take.steps || []).map(s => ({
+        start: s.start,
+        end: s.end,
+        label: s.title || s.label || '',
+        title: s.title || s.label || '',
+        tip: s.tip || '',
+      })),
+      game_specific: null,
+    };
+
+    addDebug(`[Preview] 테이크 #${take.idx} — ${take.inputs.length}입력 ${(take.durationMs/1000).toFixed(1)}s`);
+
+    // 이미 재생 중이면 먼저 정지
+    if (playStateRef.current !== 'idle') {
+      cancelAnimationFrame(rafRef.current);
+      setPlayState('idle');
+    }
+
+    // 미리보기 콤보를 플레이백 엔진에 주입 (activeCombo가 이 값을 우선 사용함)
+    setPreviewCombo(syntheticCombo);
+    previewComboRef.current = syntheticCombo;
+
+    // activeComboRef도 즉시 갱신 (tick 루프가 바로 참조함)
+    activeComboRef.current = syntheticCombo;
+
+    // 루프는 1회로 고정 (미리보기는 한 번만)
+    setLoopMode('once');
+    loopModeRef.current = 'once';
+
+    // 런 카운터 초기화 후 카운트다운 시작
+    runCountRef.current = 0;
+    setRunLog([]);
+
+    // 약간의 딜레이 후 카운트다운 시작 (React state 반영 대기)
+    setTimeout(() => { startCountdown(); }, 50);
+  }, [addDebug]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // F9(Overwolf 호키) / \(브라우저 개발) = 연습 토글
   // F1/F3/F5/F7/F8/F11/ESC → masterKeyRef(OW inputTracking) 경유 — 인게임 동작
@@ -1711,6 +2771,12 @@ const App = () => {
     runCountRef.current += 1;
     setRunLog(prev => [...prev.slice(-4), log]);
 
+    // 연습 기록 추가 — RecordLogWidget 의 "연습 기록" 섹션에 표시
+    setPracticeRuns(prev => [
+      { id: crypto.randomUUID(), comboId: activeComboRef.current?.id, comboTitle: activeComboRef.current?.title, score: scoreRef.current, ts: Date.now() },
+      ...prev
+    ].slice(0, 50));
+
     const mode = loopModeRef.current;
     const shouldLoop = mode === 'inf'
       || (mode === '3x' && runCountRef.current < 3)
@@ -1721,6 +2787,12 @@ const App = () => {
       setTimeout(() => startCountdown(), 600);
     } else {
       setPlayState('idle');
+      // 미리보기 중이었으면 종료 시 초기화
+      if (previewComboRef.current) {
+        setPreviewCombo(null);
+        previewComboRef.current = null;
+        addDebug('[Preview] 미리보기 완료 — 일반 모드 복귀');
+      }
     }
   }
 
@@ -1775,8 +2847,8 @@ const App = () => {
     return {
       champion:  { x: u(100),       y: u(20) },
       sequence:  { x: u(vw * 0.32), y: u(20) },
-      bindings:  { x: u(100),       y: u(vh * 0.45) },
-      control:   { x: u(100),       y: u(vh * 0.58) },
+      bindings:  { x: u(100),       y: u(vh * 0.55) },
+      control:   { x: u(100),       y: u(vh * 0.36) },
       video:     { x: u(vw * 0.55), y: u(20) },
       recordLog: { x: u(100),       y: u(vh * 0.28) }, // 챔피언 아래, 컨트롤 위
     };
@@ -1784,21 +2856,80 @@ const App = () => {
 
   return (
     <div style={{ position:'fixed', inset:0, overflow:'hidden', pointerEvents:'none' }}>
-      {/* 카운트다운 — 스케일 밖에서 뷰포트 중앙 */}
-      {playState === 'countdown' && (
-        <div style={{ position:'fixed', inset:0, display:'flex', alignItems:'center', justifyContent:'center', pointerEvents:'none', zIndex:100 }}>
-          <div style={{
-            fontSize: countNum > 0 ? 200 : 140,
-            fontWeight:900, lineHeight:1,
-            color: countNum > 0 ? '#00d4ff' : '#00ffaa',
-            textShadow: countNum > 0
-              ? '0 0 40px rgba(0,200,255,1), 0 0 100px rgba(0,180,255,0.6)'
-              : '0 0 40px rgba(0,255,170,1), 0 0 100px rgba(0,255,170,0.5)',
-            animation:'popIn 0.25s ease',
-            letterSpacing: countNum > 0 ? -10 : 6,
-          }}>
-            {countNum > 0 ? countNum : 'GO!'}
+      {/* 녹화 카운트다운 — 3-2-1 → REC. 위젯이 다 숨겨진 상태에서 표시 */}
+      {recordCountNum !== null && (() => {
+        const REC_COLORS = { 3: '#ff6b6b', 2: '#ff4d4d', 1: '#ff2222' };
+        const color = recordCountNum > 0 ? (REC_COLORS[recordCountNum] || '#ff4444') : '#ff0000';
+        return (
+          <div style={{ position:'fixed', inset:0, display:'flex', alignItems:'center', justifyContent:'center', pointerEvents:'none', zIndex:100 }}>
+            <div key={`rec-${recordCountNum}`} style={{ position:'relative', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center' }}>
+              <div style={{
+                fontSize: recordCountNum > 0 ? 110 : 100,
+                fontWeight: 900, lineHeight: 1, letterSpacing: recordCountNum > 0 ? -4 : 4,
+                color, textShadow: `0 0 30px ${color}, 0 0 80px ${color}80`,
+                animation: recordCountNum > 0 ? 'countSlam 1s ease forwards' : 'goSlam 0.6s ease forwards',
+                willChange: 'transform, opacity',
+                position: 'relative', zIndex: 1,
+              }}>
+                {recordCountNum > 0 ? recordCountNum : '● REC'}
+              </div>
+              <div style={{ position:'absolute', bottom:-30, color:'rgba(255,255,255,0.6)', fontSize:11, fontFamily:'monospace', whiteSpace:'nowrap' }}>
+                {recordCountNum > 0 ? '오버레이 숨김 — 게임 화면만 캡처됨' : ''}
+              </div>
+            </div>
           </div>
+        );
+      })()}
+
+      {/* 카운트다운 — 스케일 밖에서 뷰포트 중앙 */}
+      {playState === 'countdown' && (() => {
+        const COUNT_COLORS = { 3: '#00d4ff', 2: '#ffcc00', 1: '#ff4d4d' };
+        const color = countNum > 0 ? (COUNT_COLORS[countNum] || '#ffffff') : '#00ff88';
+        return (
+          <div style={{ position:'fixed', inset:0, display:'flex', alignItems:'center', justifyContent:'center', pointerEvents:'none', zIndex:100 }}>
+            <div key={countNum} style={{ position:'relative', display:'flex', alignItems:'center', justifyContent:'center' }}>
+              {/* Number or GO! */}
+              <div style={{
+                fontSize: countNum > 0 ? 110 : 130,
+                fontWeight: 900,
+                lineHeight: 1,
+                letterSpacing: countNum > 0 ? -4 : 8,
+                color,
+                textShadow: `0 0 30px ${color}, 0 0 80px ${color}80`,
+                animation: countNum > 0 ? 'countSlam 1s ease forwards' : 'goSlam 0.6s ease forwards',
+                willChange: 'transform, opacity',
+                position: 'relative',
+                zIndex: 1,
+              }}>
+                {countNum > 0 ? countNum : 'GO!'}
+              </div>
+
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* 미리보기 배너 — 미리보기 중에만 표시 */}
+      {previewCombo && (playState === 'playing' || playState === 'countdown') && (
+        <div style={{
+          position:'fixed', top:12, left:'50%', transform:'translateX(-50%)',
+          display:'flex', alignItems:'center', gap:10,
+          background:'rgba(0,30,10,0.88)',
+          border:'1px solid rgba(0,220,100,0.55)',
+          borderRadius:20, padding:'5px 16px',
+          zIndex:200, pointerEvents:'auto', userSelect:'none',
+          boxShadow:'0 0 16px rgba(0,200,80,0.3)',
+          animation:'fadeIn 0.2s ease',
+        }}>
+          <span style={{ width:7, height:7, borderRadius:'50%', background:'#00ff88',
+            boxShadow:'0 0 8px #00ff88', flexShrink:0, animation:'pulse 1s infinite' }} />
+          <span style={{ fontFamily:'monospace', fontSize:11, fontWeight:700, color:'#00ff88',
+            textShadow:'0 0 8px rgba(0,255,130,0.7)', letterSpacing:0.5 }}>
+            미리보기 중 — F12로 스텝 마킹 | F9로 중지&nbsp;
+            <span style={{ color:'rgba(0,255,136,0.65)', fontWeight:400 }}>
+              (스텝: {previewCombo?.steps?.length ?? 0}개)
+            </span>
+          </span>
         </div>
       )}
 
@@ -1835,6 +2966,13 @@ const App = () => {
             REC {recordInputsRef.current.length}키
           </span>
         </>}
+        {stepFlash && <>
+          <span style={{ color:'rgba(255,255,255,0.2)' }}>·</span>
+          <span style={{ fontFamily:'monospace', fontSize:10, fontWeight:700, color:'#ffdd00',
+            textShadow:'0 0 8px rgba(255,220,0,0.8)' }}>
+            ● Step marked
+          </span>
+        </>}
         <span style={{ color:'rgba(255,255,255,0.2)' }}>·</span>
         <span style={{ fontFamily:'monospace', fontSize:9,
           color: showDebug ? 'rgba(255,200,0,0.8)' : 'rgba(255,255,255,0.3)' }}>
@@ -1843,7 +2981,9 @@ const App = () => {
       </div>
 
       {/* 전체 위젯 스케일 컨테이너 — control center의 +/− 로 조절 */}
-      <div style={{ position:'absolute', inset:0, zoom: widgetScale }}>
+      {/* 녹화 카운트다운 중 또는 녹화 중에는 숨김 — past 60초 버퍼에 깨끗한 게임 footage 들어가게 */}
+      <div style={{ position:'absolute', inset:0, zoom: widgetScale,
+        visibility: (recordCountNum !== null || recordState === 'recording') ? 'hidden' : 'visible' }}>
 
       {/* 통합: 챔피언 + 콤보 목록 */}
       <Widget defaultPos={DEFAULT.champion} width={240} visible={show.champion} scale={widgetScale}>
@@ -1916,12 +3056,20 @@ const App = () => {
         <WHeader title="녹화" sub={recordState==='recording'?'● REC':recordTakes.length>0?`${recordTakes.length}개 테이크`:''} />
         <RecordLogWidget
           takes={recordTakes}
+          practiceRuns={practiceRuns}
           recordState={recordState}
           onSelectTake={setSelectedTakeId}
-          onDeleteTake={id => setRecordTakes(prev => prev.filter(t => t.id !== id))}
+          onDeleteTake={id => setRecordTakes(prev => {
+            const next = prev.filter(t => t.id !== id);
+            // 테이크 삭제 직후 state.json에 저장
+            writeStateFile(next, desktopTokenRef.current);
+            return next;
+          })}
           selectedTakeId={selectedTakeId}
           onDownload={handleDownload}
           downloadState={downloadState}
+          onShare={handleShare}
+          onPreview={handlePreview}
         />
       </Widget>
 
@@ -1940,13 +3088,30 @@ const App = () => {
 
       </div>{/* 스케일 컨테이너 끝 */}
 
-      {/* ── 디버그 패널 (우상단 — 미니맵 회피) — 스케일 밖, 화면 고정 위치 ── */}
+      {/* ── 공유 상태 카드 — 스케일 밖, 우상단 ── */}
+      <ShareStatus
+        shareState={shareState}
+        onClose={() => setShareState({ status: 'idle' })}
+        onTokenConfirm={async (token) => {
+          const trimmed = (token || '').trim();
+          if (!trimmed) return;
+          await saveDesktopToken(trimmed);
+          const pendingTake = shareState.take;
+          setShareState({ status: 'idle' });
+          if (pendingTake) handleShare(pendingTake);
+        }}
+        onRetry={() => {
+          const pendingTake = shareState.take;
+          setShareState({ status: 'idle' });
+          if (pendingTake) handleShare(pendingTake);
+        }}
+      />
+
+      {/* ── 디버그 패널 (우측 중간 기본, 드래그로 이동 가능) ── */}
       {showDebug && (
-        <div style={{ position:'fixed', right:16, top:'35%', width:380, pointerEvents:'auto',
-          background:'rgba(0,0,0,0.88)', border:'1px solid rgba(255,200,0,0.4)', borderRadius:8,
-          fontFamily:'monospace', fontSize:11, color:'#ffe566', padding:'10px 12px', zIndex:999 }}>
-          <div style={{ fontWeight:700, fontSize:12, marginBottom:6, letterSpacing:2, color:'#ffd700' }}>
-            ■ DEBUG &nbsp;<span style={{ fontWeight:400, fontSize:10, color:'rgba(255,200,0,0.6)' }}>F8로 닫기</span>
+        <DebugPanelDraggable champion={champion} combos={combos} playerStats={playerStats} debugLog={debugLog}>
+        <div style={{ fontWeight:700, fontSize:12, marginBottom:6, letterSpacing:2, color:'#ffd700', cursor:'move' }} className="debug-handle">
+            ■ DEBUG &nbsp;<span style={{ fontWeight:400, fontSize:10, color:'rgba(255,200,0,0.6)' }}>← 드래그로 이동 / F8로 닫기</span>
           </div>
           <div style={{ marginBottom:4, color:'rgba(255,255,255,0.7)' }}>
             챔피언: <span style={{ color: champion ? '#00ffaa' : '#ff5577' }}>{champion?.name || '없음'}</span>
@@ -1968,7 +3133,7 @@ const App = () => {
                 ))
             }
           </div>
-        </div>
+        </DebugPanelDraggable>
       )}
     </div>
   );
