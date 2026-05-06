@@ -1763,7 +1763,7 @@ const ShareStatus = ({ shareState, onClose, onTokenConfirm, onRetry }) => {
           <div style={btnRow}>
             <div onClick={() => {
               if (!editUrl) return;
-              if (IS_OW) overwolf.utils.openUrlInBrowser(editUrl);
+              if (IS_OW) overwolf.utils.openUrlInDefaultBrowser(editUrl);
               else window.open(editUrl, '_blank');
             }} style={{
               ...btnPrimary,
@@ -2670,7 +2670,7 @@ const App = () => {
     window._dbgPush(`[share] Phase 2 — token ${token ? 'OK (' + token.slice(0,12) + '...)' : '없음 → 브라우저 열기'}`);
     if (!token) {
       const loginUrl = 'https://combogg-web.vercel.app/desktop-login';
-      if (IS_OW) overwolf.utils.openUrlInBrowser(loginUrl);
+      if (IS_OW) overwolf.utils.openUrlInDefaultBrowser(loginUrl);
       else window.open(loginUrl, '_blank');
       setShareState({ status: 'awaiting-token', take: workingTake });
       window._dbgPush('[share] awaiting-token 상태로 전환 — desktop-login 페이지에서 토큰 복사 후 붙여넣기 필요');
@@ -2756,7 +2756,7 @@ const App = () => {
 
       // 4. 브라우저로 편집 페이지 열기
       const editUrl = `https://combogg-web.vercel.app/combos/${comboId}/edit`;
-      if (IS_OW) overwolf.utils.openUrlInBrowser(editUrl);
+      if (IS_OW) overwolf.utils.openUrlInDefaultBrowser(editUrl);
       else window.open(editUrl, '_blank');
 
       setShareState({ status: 'done', take: workingTake, comboId, editUrl });
