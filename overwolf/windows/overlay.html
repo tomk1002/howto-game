@@ -904,8 +904,15 @@ const RequirementsWidget = ({ gameSpecific, playerStats, patch, itemsMap }) => {
 
   // 아이템 — itemsMap에서 이름 조회 (없으면 ID fallback)
   if (gs.required_items?.length) {
+    // 한 번만 디버그 로깅 — 어떤 아이템 매칭 시도하는지 확인
+    if (has && window._debugItemsLogged !== JSON.stringify(ps.items)) {
+      window._debugItemsLogged = JSON.stringify(ps.items);
+      window._dbgPush && window._dbgPush(`[items] 보유=${JSON.stringify(ps.items)} 필요=${JSON.stringify(gs.required_items)}`);
+    }
     gs.required_items.forEach(itemId => {
-      const met   = has && ps.items?.includes(String(itemId));
+      // numeric 비교 — 양쪽 다 숫자로 변환 후 비교 (타입/공백 차이 회피)
+      const required = parseInt(itemId, 10);
+      const met = has && Array.isArray(ps.items) && ps.items.some(i => parseInt(i, 10) === required);
       const iUrl  = patch ? `https://ddragon.leagueoflegends.com/cdn/${patch}/img/item/${itemId}.png` : null;
       const name  = itemsMap?.[String(itemId)]?.name || String(itemId);
       chips.push(<ReqChip key={`item-${itemId}`}
