@@ -631,6 +631,35 @@ const KEY_STYLES = {
 };
 const keyStyle = k => KEY_STYLES[k] || { bg:'rgba(20,20,30,0.72)', color:'#99aacc', border:'rgba(100,130,200,0.3)', glow:'rgba(100,130,200,0.2)' };
 
+// ── 자주 쓰이는 정적 스타일 — 모듈 레벨로 빼서 매 렌더 알로케이션 회피 ──
+const TOGGLE_BASE = {
+  display:'flex', alignItems:'center', gap:10, padding:'6px 14px', cursor:'pointer',
+  transition:'all 0.15s',
+};
+const TOGGLE_KNOB_BASE = {
+  width:30, height:15, borderRadius:999, position:'relative',
+  transition:'all 0.2s', flexShrink:0,
+};
+const TOGGLE_KNOB_DOT_BASE = {
+  position:'absolute', top:1.5, width:10, height:10, borderRadius:'50%',
+  background:'#fff', transition:'left 0.2s',
+};
+const TOGGLE_HOTKEY_STYLE = {
+  fontFamily:'monospace', fontSize:9, color:'rgba(0,200,255,0.4)',
+  textShadow:'0 0 6px rgba(0,200,255,0.3)',
+};
+const LOOP_BTN_BASE = {
+  flex:1, textAlign:'center', padding:'5px 0',
+  borderRadius:5, cursor:'pointer', fontFamily:'monospace',
+  fontSize:11, transition:'all 0.15s',
+};
+const SCALE_BTN_STYLE = {
+  cursor:'pointer', width:28, height:28, borderRadius:6, flexShrink:0,
+  display:'flex', alignItems:'center', justifyContent:'center',
+  background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.12)',
+  fontSize:18, color:'rgba(255,255,255,0.65)', fontWeight:700, userSelect:'none',
+};
+
 // AA는 타원형 (클릭 느낌), 나머지는 정사각형
 const Keycap = ({ k, size=36, accent=false, dim=false }) => {
   const s = keyStyle(k);
@@ -908,7 +937,7 @@ const ReqChip = ({ label, met, iconUrl, noData }) => {
   );
 };
 
-const RequirementsWidget = ({ gameSpecific, playerStats, patch, itemsMap }) => {
+const RequirementsWidget = React.memo(({ gameSpecific, playerStats, patch, itemsMap }) => {
   if (!gameSpecific) return null;
   const gs  = gameSpecific;
   const ps  = playerStats;
@@ -1005,7 +1034,7 @@ const RequirementsWidget = ({ gameSpecific, playerStats, patch, itemsMap }) => {
       </div>
     </div>
   );
-};
+});
 
 // ── 4. 콤보 시퀀스 — 테이프 뷰 (전체 키 동시 표시) ─────────────
 const QUALITY_LABEL = { perfect:'PERFECT', good:'GOOD', ok:'OK', miss:'MISS' };
@@ -1222,7 +1251,7 @@ const RunHistoryWidget = ({ runLog, playState }) => {
 };
 
 // ── 6. 녹화 테이크 로그 ──────────────────────────────────────────
-const RecordLogWidget = ({ takes, practiceRuns = [], recordState, onSelectTake, onDeleteTake, selectedTakeId, onDownload, downloadState, onShare, onPreview }) => {
+const RecordLogWidget = React.memo(({ takes, practiceRuns = [], recordState, onSelectTake, onDeleteTake, selectedTakeId, onDownload, downloadState, onShare, onPreview }) => {
   const [moreOpen, setMoreOpen] = useState(false);
   const [moreMenuPos, setMoreMenuPos] = useState({ left: 0, top: 0 });
   const moreBtnRef = React.useRef(null);
@@ -1461,10 +1490,10 @@ const RecordLogWidget = ({ takes, practiceRuns = [], recordState, onSelectTake, 
       )}
     </div>
   );
-};
+});
 
 // ── 5. 키 바인딩 — 3열: [스킬 아이콘] [슬롯/스킬명] [내 바인딩] ─
-const BindingsWidget = ({ bindings, onChange, champData, patch }) => {
+const BindingsWidget = React.memo(({ bindings, onChange, champData, patch }) => {
   const [listening, setListening] = useState(null);
 
   // 진단: 렌더 호출 확인
@@ -1547,26 +1576,30 @@ const BindingsWidget = ({ bindings, onChange, champData, patch }) => {
       })}
     </div>
   );
-};
+});
 
 // ── 6. 컨트롤 패널 ──────────────────────────────────────────────
 const Toggle = ({ on, onClick, label, hotkey }) => (
-  <div onClick={onClick} style={{ display:'flex', alignItems:'center', gap:10, padding:'6px 14px', cursor:'pointer',
+  <div onClick={onClick} style={{
+    ...TOGGLE_BASE,
     background: on ? 'rgba(0,200,255,0.04)' : 'transparent',
     borderLeft: on ? '2px solid rgba(0,200,255,0.4)' : '2px solid transparent',
-    transition:'all 0.15s' }}>
-    <div style={{ width:30, height:15, borderRadius:999, position:'relative',
+  }}>
+    <div style={{
+      ...TOGGLE_KNOB_BASE,
       background: on ? 'linear-gradient(90deg,#0066ff,#00d4ff)' : 'rgba(255,255,255,0.1)',
       boxShadow: on ? '0 0 10px rgba(0,200,255,0.5)' : 'none',
-      transition:'all 0.2s', flexShrink:0,
-      border:`1px solid ${on ? 'rgba(0,200,255,0.5)' : 'rgba(255,255,255,0.1)'}` }}>
-      <div style={{ position:'absolute', top:1.5, left:on?16:1.5, width:10, height:10, borderRadius:'50%',
-        background:'#fff', boxShadow: on ? '0 0 6px rgba(0,200,255,0.8)' : 'none', transition:'left 0.2s' }} />
+      border:`1px solid ${on ? 'rgba(0,200,255,0.5)' : 'rgba(255,255,255,0.1)'}`,
+    }}>
+      <div style={{
+        ...TOGGLE_KNOB_DOT_BASE,
+        left: on ? 16 : 1.5,
+        boxShadow: on ? '0 0 6px rgba(0,200,255,0.8)' : 'none',
+      }} />
     </div>
     <span style={{ flex:1, fontSize:13, color:on?'rgba(200,240,255,0.95)':'rgba(255,255,255,0.45)',
       textShadow: on ? '0 0 8px rgba(0,200,255,0.4)' : 'none' }}>{label}</span>
-    {hotkey && <span style={{ fontFamily:'monospace', fontSize:9, color:'rgba(0,200,255,0.4)',
-      textShadow:'0 0 6px rgba(0,200,255,0.3)' }}>{hotkey}</span>}
+    {hotkey && <span style={TOGGLE_HOTKEY_STYLE}>{hotkey}</span>}
   </div>
 );
 
@@ -1577,7 +1610,7 @@ const LOOP_OPTS = [
   { id:'inf',  label:'무한' },
 ];
 
-const ControlWidget = ({ show, onToggle, onHideAll, onShowAll, playState, onPlayToggle, loopMode, onLoopChange, widgetScale, onScaleChange, showDebug, onToggleDebug, recordState, onRecordToggle, onRecordCancel }) => {
+const ControlWidget = React.memo(({ show, onToggle, onHideAll, onShowAll, playState, onPlayToggle, loopMode, onLoopChange, widgetScale, onScaleChange, showDebug, onToggleDebug, recordState, onRecordToggle, onRecordCancel }) => {
   const [expanded, setExpanded] = useState(true);
   return (
     <div>
@@ -1669,15 +1702,12 @@ const ControlWidget = ({ show, onToggle, onHideAll, onShowAll, playState, onPlay
                 const active = loopMode === opt.id;
                 return (
                   <div key={opt.id} onClick={() => onLoopChange(opt.id)} style={{
-                    flex:1, textAlign:'center', padding:'5px 0',
-                    borderRadius:5, cursor:'pointer', fontFamily:'monospace',
-                    fontSize: 11,
+                    ...LOOP_BTN_BASE,
                     background: active ? 'linear-gradient(135deg,rgba(0,100,255,0.3),rgba(0,200,255,0.15))' : 'rgba(255,255,255,0.04)',
                     border: `1px solid ${active ? 'rgba(0,200,255,0.6)' : 'rgba(255,255,255,0.06)'}`,
                     color: active ? '#00d4ff' : 'rgba(255,255,255,0.35)',
                     boxShadow: active ? '0 0 10px rgba(0,200,255,0.3), inset 0 0 8px rgba(0,100,255,0.1)' : 'none',
                     textShadow: active ? '0 0 8px rgba(0,200,255,0.8)' : 'none',
-                    transition:'all 0.15s',
                   }}>
                     {opt.label}
                   </div>
@@ -1691,19 +1721,13 @@ const ControlWidget = ({ show, onToggle, onHideAll, onShowAll, playState, onPlay
             <div style={{ fontFamily:'monospace', fontSize:11, letterSpacing:1.5, fontWeight:600, color:'rgba(255,255,255,0.6)', marginBottom:6 }}>크기</div>
             <div style={{ display:'flex', alignItems:'center', gap:8 }}>
               <div onPointerDown={e=>e.stopPropagation()} onClick={() => onScaleChange(Math.max(0.5, Math.round((widgetScale-0.1)*10)/10))}
-                style={{ cursor:'pointer', width:28, height:28, borderRadius:6, flexShrink:0,
-                  display:'flex', alignItems:'center', justifyContent:'center',
-                  background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.12)',
-                  fontSize:18, color:'rgba(255,255,255,0.65)', fontWeight:700, userSelect:'none' }}>−</div>
+                style={SCALE_BTN_STYLE}>−</div>
               <div style={{ flex:1, textAlign:'center', fontFamily:'monospace', fontSize:13,
                 color:'rgba(0,200,255,0.85)', fontWeight:700, letterSpacing:1 }}>
                 {Math.round(widgetScale*100)}%
               </div>
               <div onPointerDown={e=>e.stopPropagation()} onClick={() => onScaleChange(Math.min(1.3, Math.round((widgetScale+0.1)*10)/10))}
-                style={{ cursor:'pointer', width:28, height:28, borderRadius:6, flexShrink:0,
-                  display:'flex', alignItems:'center', justifyContent:'center',
-                  background:'rgba(255,255,255,0.06)', border:'1px solid rgba(255,255,255,0.12)',
-                  fontSize:18, color:'rgba(255,255,255,0.65)', fontWeight:700, userSelect:'none' }}>+</div>
+                style={SCALE_BTN_STYLE}>+</div>
             </div>
           </div>
 
@@ -1735,7 +1759,7 @@ const ControlWidget = ({ show, onToggle, onHideAll, onShowAll, playState, onPlay
       )}
     </div>
   );
-};
+});
 
 // ── 7. 참고 영상 위젯 ────────────────────────────────────────────
 const VideoWidget = React.memo(({ videoUrl, visible, defaultPos, scale }) => {
@@ -1775,7 +1799,7 @@ const VideoWidget = React.memo(({ videoUrl, visible, defaultPos, scale }) => {
 //   idle | waiting-video | awaiting-token | uploading | done | token-expired | error
 // 게임 입력 충돌 회피를 위해 오버레이 내 폼은 제거. 자동 메타데이터로 draft 업로드 후
 // 브라우저로 /combos/[id]/edit 페이지를 열어 사용자가 거기서 편집·게시한다.
-const ShareStatus = ({ shareState, onClose, onTokenConfirm, onRetry }) => {
+const ShareStatus = React.memo(({ shareState, onClose, onTokenConfirm, onRetry }) => {
   const [pastedToken, setPastedToken] = React.useState('');
   const [showManualFallback, setShowManualFallback] = React.useState(false);
 
@@ -2040,7 +2064,7 @@ const ShareStatus = ({ shareState, onClose, onTokenConfirm, onRetry }) => {
   }
 
   return null;
-};
+});
 
 // ── 자동 스텝 감지 — 녹화 정지 시 입력 간격으로 스텝 분할 ────────────
 function autoDetectSteps(inputs, durationMs, gapThreshold = 400) {
@@ -2560,7 +2584,17 @@ const App = () => {
           nextStats.items = items.map(it => String(it.itemID));
         }
         if (Object.keys(nextStats).length) {
-          setPlayerStats(prev => ({ ...(prev||{}), ...nextStats }));
+          // 동일 값이면 같은 reference 반환 → React가 re-render skip
+          setPlayerStats(prev => {
+            if (prev &&
+                prev.level === nextStats.level &&
+                prev.abilityHaste === nextStats.abilityHaste &&
+                prev.attackSpeed === nextStats.attackSpeed &&
+                JSON.stringify(prev.items) === JSON.stringify(nextStats.items)) {
+              return prev;
+            }
+            return { ...(prev||{}), ...nextStats };
+          });
         }
       } catch(err) {
         if (pollCount <= 3) addDebug(`[poll] ${err?.message || err}`);
@@ -2725,13 +2759,19 @@ const App = () => {
     });
   }, []);
 
-  // 연습 tick
+  // 연습 tick — playMs setState는 100ms throttle로 ~10fps만 re-render
+  // (raf는 60fps로 계속 돌지만 setPlayMs는 10번/초만 호출 → App re-render 60→10)
+  // playRef.current.playMs는 매 프레임 정확하게 갱신되므로 점수 채점 정확도는 유지
   useEffect(() => {
     if (playState !== 'playing') return;
+    let lastSet = 0;
     const tick = ts => {
       const ms = (ts - playRef.current.startTime) * playRef.current.speed;
       playRef.current.playMs = ms;
-      setPlayMs(ms);
+      if (ts - lastSet > 100) {
+        lastSet = ts;
+        setPlayMs(ms);
+      }
       if (ms >= TOTAL) { onRunComplete(ms); return; }
       rafRef.current = requestAnimationFrame(tick);
     };
@@ -3353,7 +3393,50 @@ const App = () => {
     qualTimer.current = setTimeout(() => setLastQuality(null), 700);
   }
 
-  const toggleShow = key => setShow(prev => ({ ...prev, [key]: !prev[key] }));
+  const toggleShow = useCallback(key => setShow(prev => ({ ...prev, [key]: !prev[key] })), []);
+
+  // ── 안정적 콜백 (자식 위젯 React.memo 동작에 필수) ─────────────────
+  // refs 기반이라 deps는 비어 있어도 항상 최신 동작을 호출함
+  const onPlayToggle    = useCallback(() => togglePlayRef.current?.(), []);
+  const onLoopChange    = useCallback(m => { setLoopMode(m); runCountRef.current = 0; }, []);
+  const onScaleChange   = useCallback(s => setWidgetScale(s), []);
+  const onToggleDebug   = useCallback(() => setShowDebug(v => !v), []);
+  const onRecordToggle  = useCallback(() => {
+    if (recordStateRef.current === 'recording') stopRecordRef.current?.();
+    else startRecordRef.current?.();
+  }, []);
+  const onRecordCancel  = useCallback(() => cancelRecordRef.current?.(), []);
+  const onHideAll       = useCallback(() => {
+    setShow({ champion:false, sequence:false, bindings:false, video:false, recordLog:false });
+    setShowDebug(false);
+  }, []);
+  const onShowAll       = useCallback(() => {
+    setShow({ champion:true, sequence:true, bindings:true, video:true, recordLog:true });
+  }, []);
+  const onSelectTake    = useCallback(id => setSelectedTakeId(id), []);
+  const onDeleteTake    = useCallback(id => setRecordTakes(prev => {
+    const next = prev
+      .filter(t => t.id !== id)
+      .map((t, i) => ({ ...t, idx: i + 1 }));
+    recordIdxRef.current = next.length;
+    writeStateFile(next, desktopTokenRef.current);
+    return next;
+  }), []);
+  const onSelectCombo   = useCallback(id => { setActiveId(id); resetSession(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const onShareClose    = useCallback(() => setShareState({ status: 'idle' }), []);
+  const onShareTokenConfirm = useCallback(async (token) => {
+    const trimmed = (token || '').trim();
+    if (!trimmed) return;
+    await saveDesktopToken(trimmed);
+    const pendingTake = shareStateRef.current?.take;
+    setShareState({ status: 'idle' });
+    if (pendingTake) handleShareRef.current?.(pendingTake);
+  }, [saveDesktopToken]);
+  const onShareRetry    = useCallback(() => {
+    const pendingTake = shareStateRef.current?.take;
+    setShareState({ status: 'idle' });
+    if (pendingTake) handleShareRef.current?.(pendingTake);
+  }, []);
 
   // 기본 배치 — 뷰포트 % 기반 (해상도·창 크기 자동 대응)
   // unscaled 좌표 = visual_px / scale
@@ -3549,7 +3632,7 @@ const App = () => {
             background: champion ? '#00ffaa' : 'rgba(255,255,255,0.15)',
             boxShadow: champion ? '0 0 10px #00ffaa, 0 0 20px rgba(0,255,170,0.4)' : 'none' }} />
         </div>
-        <ComboQueueWidget combos={combos} activeId={activeId} onSelect={id=>{setActiveId(id);resetSession();}} onRefresh={refreshCombos} />
+        <ComboQueueWidget combos={combos} activeId={activeId} onSelect={onSelectCombo} onRefresh={refreshCombos} />
       </Widget>
 
       {/* 통합: 콤보 시퀀스 + 런 기록 */}
@@ -3586,17 +3669,8 @@ const App = () => {
           takes={recordTakes}
           practiceRuns={practiceRuns}
           recordState={recordState}
-          onSelectTake={setSelectedTakeId}
-          onDeleteTake={id => setRecordTakes(prev => {
-            // 삭제 후 남은 takes의 idx를 1부터 순서대로 재할당 — gap 방지
-            const next = prev
-              .filter(t => t.id !== id)
-              .map((t, i) => ({ ...t, idx: i + 1 }));
-            // recordIdxRef도 새 max로 동기화 (다음 새 take는 length+1부터)
-            recordIdxRef.current = next.length;
-            writeStateFile(next, desktopTokenRef.current);
-            return next;
-          })}
+          onSelectTake={onSelectTake}
+          onDeleteTake={onDeleteTake}
           selectedTakeId={selectedTakeId}
           onDownload={handleDownload}
           downloadState={downloadState}
@@ -3608,15 +3682,15 @@ const App = () => {
       <Widget defaultPos={DEFAULT.control} width={220} scale={widgetScale}>
         <ControlWidget
           show={show} onToggle={toggleShow}
-          onHideAll={() => { setShow({ champion:false, sequence:false, bindings:false, video:false, recordLog:false }); setShowDebug(false); }}
-          onShowAll={() => { setShow({ champion:true, sequence:true, bindings:true, video:true, recordLog:true }); }}
-          playState={playState} onPlayToggle={() => togglePlayRef.current?.()}
-          loopMode={loopMode} onLoopChange={m=>{setLoopMode(m);runCountRef.current=0;}}
-          widgetScale={widgetScale} onScaleChange={setWidgetScale}
-          showDebug={showDebug} onToggleDebug={() => setShowDebug(v => !v)}
+          onHideAll={onHideAll}
+          onShowAll={onShowAll}
+          playState={playState} onPlayToggle={onPlayToggle}
+          loopMode={loopMode} onLoopChange={onLoopChange}
+          widgetScale={widgetScale} onScaleChange={onScaleChange}
+          showDebug={showDebug} onToggleDebug={onToggleDebug}
           recordState={recordState}
-          onRecordToggle={() => recordState === 'recording' ? stopRecordRef.current?.() : startRecordRef.current?.()}
-          onRecordCancel={() => cancelRecordRef.current?.()}
+          onRecordToggle={onRecordToggle}
+          onRecordCancel={onRecordCancel}
         />
       </Widget>
 
@@ -3625,20 +3699,9 @@ const App = () => {
       {/* ── 공유 상태 카드 — 스케일 밖, 우상단 ── */}
       <ShareStatus
         shareState={shareState}
-        onClose={() => setShareState({ status: 'idle' })}
-        onTokenConfirm={async (token) => {
-          const trimmed = (token || '').trim();
-          if (!trimmed) return;
-          await saveDesktopToken(trimmed);
-          const pendingTake = shareState.take;
-          setShareState({ status: 'idle' });
-          if (pendingTake) handleShare(pendingTake);
-        }}
-        onRetry={() => {
-          const pendingTake = shareState.take;
-          setShareState({ status: 'idle' });
-          if (pendingTake) handleShare(pendingTake);
-        }}
+        onClose={onShareClose}
+        onTokenConfirm={onShareTokenConfirm}
+        onRetry={onShareRetry}
       />
 
       {/* ── 디버그 패널 (우측 중간 기본, 드래그로 이동 가능) ── */}
