@@ -1679,10 +1679,14 @@ const VideoWidget = ({ videoUrl, visible, defaultPos, scale }) => {
 // 브라우저로 /combos/[id]/edit 페이지를 열어 사용자가 거기서 편집·게시한다.
 const ShareStatus = ({ shareState, onClose, onTokenConfirm, onRetry }) => {
   const [pastedToken, setPastedToken] = React.useState('');
+  const [showManualFallback, setShowManualFallback] = React.useState(false);
 
   // awaiting-token 상태가 풀리면 입력값 비우기
   React.useEffect(() => {
-    if (shareState?.status !== 'awaiting-token') setPastedToken('');
+    if (shareState?.status !== 'awaiting-token') {
+      setPastedToken('');
+      setShowManualFallback(false);
+    }
   }, [shareState?.status]);
 
   if (!shareState || shareState.status === 'idle') return null;
@@ -1750,6 +1754,70 @@ const ShareStatus = ({ shareState, onClose, onTokenConfirm, onRetry }) => {
   }
 
   if (status === 'awaiting-token') {
+    // autoPickup 모드: 브라우저 OAuth 후 자동으로 토큰 폴링
+    if (shareState.autoPickup) {
+      return (
+        <div style={cardWrap}>
+          <div style={boxStyle}>
+            {closeBtn}
+            <div style={titleStyle('#a78bfa')}>브라우저에서 로그인해주세요</div>
+            <div style={{ ...bodyStyle, display:'flex', alignItems:'center', gap:8 }}>
+              {/* CSS 스피너 (인라인 keyframes 없이 SVG 회전) */}
+              <svg width="14" height="14" viewBox="0 0 24 24" style={{
+                animation:'spin 0.9s linear infinite',
+                flexShrink:0,
+              }}>
+                <circle cx="12" cy="12" r="10" stroke="rgba(167,139,250,0.25)" strokeWidth="3" fill="none" />
+                <path d="M12 2 a10 10 0 0 1 10 10" stroke="#a78bfa" strokeWidth="3" fill="none" strokeLinecap="round" />
+              </svg>
+              <span>자동으로 받아옵니다... (최대 2분)</span>
+            </div>
+            <style>{`@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }`}</style>
+            <div style={btnRow}>
+              <div onClick={onClose} style={btnGhost}>취소</div>
+            </div>
+            <div
+              onClick={() => setShowManualFallback(v => !v)}
+              style={{
+                marginTop:10, fontSize:10, color:'rgba(255,255,255,0.45)',
+                cursor:'pointer', textAlign:'center', userSelect:'none',
+                fontFamily:'monospace',
+              }}
+            >
+              {showManualFallback ? '▲ 수동 입력 닫기' : '수동으로 진행하려면 ▼ 클릭'}
+            </div>
+            {showManualFallback && (
+              <div style={{ marginTop:8, paddingTop:8, borderTop:'1px solid rgba(255,255,255,0.08)' }}>
+                <div style={{ fontSize:10, color:'rgba(255,255,255,0.5)', marginBottom:6, lineHeight:1.5 }}>
+                  자동 픽업이 실패하면 토큰을 직접 붙여넣을 수 있습니다.
+                </div>
+                <input
+                  type="text"
+                  value={pastedToken}
+                  onChange={e => setPastedToken(e.target.value)}
+                  placeholder="토큰 붙여넣기..."
+                  style={{
+                    width:'100%', padding:'7px 9px', borderRadius:5,
+                    background:'rgba(255,255,255,0.06)',
+                    border:'1px solid rgba(100,80,255,0.4)',
+                    color:'#fff', fontFamily:'monospace', fontSize:11,
+                    outline:'none', marginBottom:8, boxSizing:'border-box',
+                  }}
+                />
+                <div style={btnRow}>
+                  <div onClick={() => {
+                    const t = (pastedToken || '').trim();
+                    if (t) onTokenConfirm(t);
+                  }} style={btnPrimary}>확인</div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // 백워드 호환: 기존 수동 paste UI
     return (
       <div style={cardWrap}>
         <div style={boxStyle}>
@@ -2054,6 +2122,7 @@ const App = () => {
   const qualTimer      = useRef(null);
   const inputHandlerRef = useRef(null);
   const togglePlayRef   = useRef(null);
+  const handleShareRef  = useRef(null); // auto-pickup 폴링에서 재귀 호출용
   const matchedRef      = useRef(new Set());
   const activeComboRef  = useRef(null);
   const bindingsRef     = useRef(bindings);
@@ -2766,15 +2835,67 @@ const App = () => {
 
     window._dbgPush(`[share] Phase 1 통과 — videoBytes ${workingTake.videoBytes?.byteLength || 0} bytes`);
 
-    // Phase 2 — 토큰 확인 (없으면 브라우저로 desktop-login 열고 awaiting-token)
+    // Phase 2 — 토큰 확인 (없으면 브라우저로 desktop-login 열고 자동 픽업 폴링)
     let token = desktopTokenRef.current;
     window._dbgPush(`[share] Phase 2 — token ${token ? 'OK (' + token.slice(0,12) + '...)' : '없음 → 브라우저 열기'}`);
     if (!token) {
-      const loginUrl = 'https://combogg-web.vercel.app/desktop-login';
+      // 자동 픽업: nonce 생성, 브라우저로 OAuth 흐름 보내고, 폴링으로 토큰 받음
+      const nonce = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : ('xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+            const r = Math.random() * 16 | 0;
+            return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+          }));
+      const loginUrl = `https://combogg-web.vercel.app/desktop-login?nonce=${nonce}`;
       if (IS_OW) overwolf.utils.openUrlInDefaultBrowser(loginUrl);
       else window.open(loginUrl, '_blank');
-      setShareState({ status: 'awaiting-token', take: workingTake });
-      window._dbgPush('[share] awaiting-token 상태로 전환 — desktop-login 페이지에서 토큰 복사 후 붙여넣기 필요');
+      setShareState({ status: 'awaiting-token', take: workingTake, nonce, autoPickup: true });
+      window._dbgPush(`[share] auto-pickup 시작 — nonce=${nonce.slice(0,8)}`);
+
+      // 폴링: 2초마다, 최대 2분
+      const POLL_INTERVAL = 2000;
+      const POLL_TIMEOUT = 120000;
+      const startTs = Date.now();
+      const pollLoop = async () => {
+        while (Date.now() - startTs < POLL_TIMEOUT) {
+          // 사용자가 취소했으면 중단
+          const cur = shareStateRef.current;
+          if (!cur || cur.status !== 'awaiting-token' || cur.nonce !== nonce) {
+            window._dbgPush('[share] auto-pickup 취소됨');
+            return;
+          }
+          try {
+            const res = await fetch(`https://combogg-web.vercel.app/api/auth/desktop-login-poll?nonce=${nonce}`);
+            if (res.ok) {
+              const data = await res.json();
+              if (data.status === 'ready' && data.token) {
+                window._dbgPush('[share] auto-pickup 토큰 수신 OK');
+                await saveDesktopToken(data.token);
+                // 폴링 종료, 자동으로 share 흐름 재시도 (ref 사용해 stale closure 회피)
+                setShareState({ status: 'idle' });
+                (handleShareRef.current || (() => {}))(workingTake);
+                return;
+              }
+              if (data.status === 'expired') {
+                window._dbgPush('[share] auto-pickup nonce 만료');
+                setShareState({ status: 'error', take: workingTake, error: '로그인 시간 초과. 다시 시도해주세요.' });
+                return;
+              }
+              // pending → 계속 폴링
+            }
+          } catch (e) {
+            window._dbgPush('[share] auto-pickup poll 에러: ' + (e?.message || e));
+          }
+          await new Promise(r => setTimeout(r, POLL_INTERVAL));
+        }
+        // 타임아웃
+        window._dbgPush('[share] auto-pickup 타임아웃 (2분)');
+        const cur = shareStateRef.current;
+        if (cur && cur.status === 'awaiting-token' && cur.nonce === nonce) {
+          setShareState({ status: 'error', take: workingTake, error: '로그인 시간 초과 (2분). 다시 시도해주세요.' });
+        }
+      };
+      pollLoop();
       return;
     }
 
@@ -2875,6 +2996,9 @@ const App = () => {
       });
     }
   }, [patch, saveDesktopToken]);
+
+  // handleShareRef 동기화 (auto-pickup 폴링이 최신 handleShare 호출하도록)
+  useEffect(() => { handleShareRef.current = handleShare; }, [handleShare]);
 
   // ── 미리보기 핸들러 ───────────────────────────────────────────
   const handlePreview = useCallback((take) => {
