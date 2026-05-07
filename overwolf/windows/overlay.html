@@ -3249,8 +3249,12 @@ const App = () => {
           recordState={recordState}
           onSelectTake={setSelectedTakeId}
           onDeleteTake={id => setRecordTakes(prev => {
-            const next = prev.filter(t => t.id !== id);
-            // 테이크 삭제 직후 state.json에 저장
+            // 삭제 후 남은 takes의 idx를 1부터 순서대로 재할당 — gap 방지
+            const next = prev
+              .filter(t => t.id !== id)
+              .map((t, i) => ({ ...t, idx: i + 1 }));
+            // recordIdxRef도 새 max로 동기화 (다음 새 take는 length+1부터)
+            recordIdxRef.current = next.length;
             writeStateFile(next, desktopTokenRef.current);
             return next;
           })}
