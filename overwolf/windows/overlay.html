@@ -697,10 +697,22 @@ const WIDGET_MIN_H = 100;
 // 키는 widget id (champion / sequence / control 등)
 const widgetStateMap = new Map();
 
+// 위젯이 viewport 밖에 갇히지 않도록 clamp — 드래그/해상도 변경/저장 좌표 모두 보정
+function clampPos(pos, width) {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const w = width || 200;
+  const minVisible = 60; // 최소 60px는 화면 안에 보이게
+  return {
+    x: Math.max(-w + minVisible, Math.min(vw - minVisible, pos.x | 0)),
+    y: Math.max(0, Math.min(vh - minVisible, pos.y | 0)),
+  };
+}
+
 const Widget = ({ id, defaultPos, width, children, visible=true, scale=1 }) => {
   const [pos,  setPos]  = useState(() => {
-    if (id && widgetStateMap.has(id + '_pos')) return widgetStateMap.get(id + '_pos');
-    return defaultPos;
+    const saved = id ? widgetStateMap.get(id + '_pos') : null;
+    return clampPos(saved || defaultPos, width);
   });
   const [size, setSize] = useState(() => {
     if (id && widgetStateMap.has(id + '_size')) return widgetStateMap.get(id + '_size');
@@ -710,21 +722,23 @@ const Widget = ({ id, defaultPos, width, children, visible=true, scale=1 }) => {
   useEffect(() => { if (id) widgetStateMap.set(id + '_pos', pos); }, [id, pos]);
   useEffect(() => { if (id) widgetStateMap.set(id + '_size', size); }, [id, size]);
 
-  // 화면 해상도 변경(전체화면 ↔ 창모드 등) 시 비례 scale
+  // 화면 해상도 변경(전체화면 ↔ 창모드 등) 시 비례 scale + clamp
   useEffect(() => {
     const onResize = (e) => {
       const { sx, sy } = e.detail || {};
       if (!sx || !sy) return;
-      setPos(p => ({ x: Math.round(p.x * sx), y: Math.round(p.y * sy) }));
+      setPos(p => clampPos({ x: Math.round(p.x * sx), y: Math.round(p.y * sy) }, width));
       setSize(s => ({ w: s.w ? Math.round(s.w * sx) : s.w, h: s.h ? Math.round(s.h * sy) : s.h }));
     };
     // 위치 리셋 (제어 센터에서 수동 트리거)
     const onReset = () => {
       if (id && widgetStateMap.has(id + '_pos')) widgetStateMap.delete(id + '_pos');
       if (id && widgetStateMap.has(id + '_size')) widgetStateMap.delete(id + '_size');
-      setPos(defaultPos);
+      setPos(clampPos(defaultPos, width));
       setSize({ w: width, h: null });
     };
+    // mount 시 한 번 더 clamp — 저장 좌표가 현재 viewport 밖이면 화면 안으로 끌어옴
+    setPos(p => clampPos(p, width));
     window.addEventListener('overlay-resize', onResize);
     window.addEventListener('overlay-reset-positions', onReset);
     return () => {
