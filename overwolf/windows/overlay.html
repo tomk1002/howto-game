@@ -693,9 +693,22 @@ const Keycap = ({ k, size=36, accent=false, dim=false }) => {
 const WIDGET_MIN_W = 180;
 const WIDGET_MIN_H = 100;
 
-const Widget = ({ defaultPos, width, children, visible=true, scale=1 }) => {
-  const [pos,  setPos]  = useState(defaultPos);
-  const [size, setSize] = useState({ w: width, h: null }); // h=null → auto height
+// Widget pos/size 영속화 — visible 토글로 unmount돼도 위치/크기가 reset 안 되게 모듈 레벨 Map에 보관
+// 키는 widget id (champion / sequence / control 등)
+const widgetStateMap = new Map();
+
+const Widget = ({ id, defaultPos, width, children, visible=true, scale=1 }) => {
+  const [pos,  setPos]  = useState(() => {
+    if (id && widgetStateMap.has(id + '_pos')) return widgetStateMap.get(id + '_pos');
+    return defaultPos;
+  });
+  const [size, setSize] = useState(() => {
+    if (id && widgetStateMap.has(id + '_size')) return widgetStateMap.get(id + '_size');
+    return { w: width, h: null }; // h=null → auto height
+  });
+  // 변경 시 Map에 저장 — unmount 후 다시 mount해도 복원됨
+  useEffect(() => { if (id) widgetStateMap.set(id + '_pos', pos); }, [id, pos]);
+  useEffect(() => { if (id) widgetStateMap.set(id + '_size', size); }, [id, size]);
 
   // ── 드래그 이동 (헤더) — clientXY(시각)를 unscaled 좌표로 변환 ──────
   const onPointerDown = useCallback(e => {
@@ -1766,7 +1779,7 @@ const VideoWidget = React.memo(({ videoUrl, visible, defaultPos, scale }) => {
   const videoRef = useRef(null);
   if (!videoUrl) return null;
   return (
-    <Widget defaultPos={defaultPos || { x:1380, y:20 }} width={400} visible={visible} scale={scale}>
+    <Widget id="video" defaultPos={defaultPos || { x:1380, y:20 }} width={400} visible={visible} scale={scale}>
       <WHeader title="참고 영상" sub="독립 재생" right={
         <div
           onClick={e => { e.stopPropagation(); const v = videoRef.current; if (v) v.paused ? v.play() : v.pause(); }}
@@ -2146,7 +2159,7 @@ const App = () => {
   const [score, setScore] = useState(0);
   const [lastQuality, setLastQuality] = useState(null);
   const [showDebug, setShowDebug] = useState(IS_OW); // Overwolf에서는 기본 표시
-  const [widgetScale, setWidgetScale] = useState(1.0); // 전체 위젯 스케일 (기본 100%)
+  const [widgetScale, setWidgetScale] = useState(0.9); // 전체 위젯 스케일 (기본 90%)
   const [debugLog, setDebugLog] = useState([]);
 
   // ── 미리보기 state ─────────────────────────────────────────────
@@ -3447,12 +3460,12 @@ const App = () => {
     const vh = window.innerHeight;
     const u  = v => Math.round(v / widgetScale); // 초기 scale 그대로 사용
     return {
-      champion:  { x: u(20),        y: u(20) }, // 좌측 끝 (사용자 요청, 1.5x width 360 고려)
+      champion:  { x: u(60),        y: u(20) }, // 좌측 (살짝 우측으로 이동 반영)
       sequence:  { x: u(vw * 0.32), y: u(20) },
       bindings:  { x: u(vw - 320),  y: u(vh * 0.42) },
-      control:   { x: u(20),        y: u(vh * 0.40) }, // champion과 같은 x로 좌측 정렬
-      video:     { x: u(vw - 420),  y: u(20) }, // 우측 상단 모서리 (400 width + 20 margin)
-      recordLog: { x: u(20),        y: u(vh * 0.28) }, // champion과 같은 x로 좌측 정렬
+      control:   { x: u(60),        y: u(vh * 0.40) }, // champion과 같은 x
+      video:     { x: u(vw - 420),  y: u(20) }, // 우측 상단 모서리
+      recordLog: { x: u(60),        y: u(vh * 0.28) },
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -3597,7 +3610,7 @@ const App = () => {
         visibility: (recordCountNum !== null || recordState === 'recording' || isTFT) ? 'hidden' : 'visible' }}>
 
       {/* 통합: 챔피언 + 콤보 목록 */}
-      <Widget defaultPos={DEFAULT.champion} width={360} visible={show.champion} scale={widgetScale}>
+      <Widget id="champion" defaultPos={DEFAULT.champion} width={360} visible={show.champion} scale={widgetScale}>
         <div className="wh" style={{
           display:'flex', alignItems:'center', gap:12, padding:'12px 16px',
           borderBottom:'1px solid rgba(0,190,255,0.12)',
@@ -3636,7 +3649,7 @@ const App = () => {
       </Widget>
 
       {/* 통합: 콤보 시퀀스 + 런 기록 */}
-      <Widget defaultPos={DEFAULT.sequence} width={400} visible={show.sequence} scale={widgetScale}>
+      <Widget id="sequence" defaultPos={DEFAULT.sequence} width={400} visible={show.sequence} scale={widgetScale}>
         <WHeader title="연습" sub={activeCombo?.title} right={
           <span style={{ fontFamily:'monospace', fontSize:11, fontWeight:700, color:DIFF_COLOR[activeCombo?.difficulty]||'#aaa',
             textShadow:`0 0 8px ${DIFF_COLOR[activeCombo?.difficulty]||'#aaa'}` }}>
@@ -3656,14 +3669,14 @@ const App = () => {
         <RunHistoryWidget runLog={runLog} playState={playState} />
       </Widget>
 
-      <Widget defaultPos={DEFAULT.bindings} width={260} visible={show.bindings} scale={widgetScale}>
+      <Widget id="bindings" defaultPos={DEFAULT.bindings} width={260} visible={show.bindings} scale={widgetScale}>
         <WHeader title="키 바인딩" sub="클릭하여 변경" />
         <BindingsWidget bindings={bindings} onChange={setBindings} champData={champData} patch={patch} />
       </Widget>
 
       <VideoWidget videoUrl={comboDetail?.videoUrl} visible={show.video} defaultPos={DEFAULT.video} scale={widgetScale} />
 
-      <Widget defaultPos={DEFAULT.recordLog} width={260} visible={show.recordLog} scale={widgetScale}>
+      <Widget id="recordLog" defaultPos={DEFAULT.recordLog} width={260} visible={show.recordLog} scale={widgetScale}>
         <WHeader title="녹화" sub={recordState==='recording'?'● REC':recordTakes.length>0?`${recordTakes.length}개 테이크`:''} />
         <RecordLogWidget
           takes={recordTakes}
@@ -3679,7 +3692,7 @@ const App = () => {
         />
       </Widget>
 
-      <Widget defaultPos={DEFAULT.control} width={220} scale={widgetScale}>
+      <Widget id="control" defaultPos={DEFAULT.control} width={220} scale={widgetScale}>
         <ControlWidget
           show={show} onToggle={toggleShow}
           onHideAll={onHideAll}
