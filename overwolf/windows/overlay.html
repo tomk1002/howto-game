@@ -863,7 +863,7 @@ const ReqChip = ({ label, met, iconUrl, noData }) => {
   );
 };
 
-const RequirementsWidget = ({ gameSpecific, playerStats, patch }) => {
+const RequirementsWidget = ({ gameSpecific, playerStats, patch, itemsMap }) => {
   if (!gameSpecific) return null;
   const gs  = gameSpecific;
   const ps  = playerStats;
@@ -891,23 +891,25 @@ const RequirementsWidget = ({ gameSpecific, playerStats, patch }) => {
     />);
   }
 
-  // 공격 속도
+  // 공격 속도 — 소수점 2자리 반올림
   if (gs.attack_speed_min != null) {
     const cur = ps?.attackSpeed;
+    const minRounded = Number(gs.attack_speed_min).toFixed(2);
     chips.push(<ReqChip key="as"
-      label={`공속 ${gs.attack_speed_min}`}
+      label={`공속 ${minRounded}`}
       met={has && cur >= gs.attack_speed_min}
       noData={!has}
     />);
   }
 
-  // 아이템
+  // 아이템 — itemsMap에서 이름 조회 (없으면 ID fallback)
   if (gs.required_items?.length) {
     gs.required_items.forEach(itemId => {
       const met   = has && ps.items?.includes(String(itemId));
       const iUrl  = patch ? `https://ddragon.leagueoflegends.com/cdn/${patch}/img/item/${itemId}.png` : null;
+      const name  = itemsMap?.[String(itemId)]?.name || String(itemId);
       chips.push(<ReqChip key={`item-${itemId}`}
-        label={String(itemId)}
+        label={name}
         met={met}
         noData={!has}
         iconUrl={iUrl}
@@ -1412,6 +1414,11 @@ const RecordLogWidget = ({ takes, practiceRuns = [], recordState, onSelectTake, 
 // ── 5. 키 바인딩 — 3열: [스킬 아이콘] [슬롯/스킬명] [내 바인딩] ─
 const BindingsWidget = ({ bindings, onChange, champData, patch }) => {
   const [listening, setListening] = useState(null);
+
+  // 진단: 렌더 호출 확인
+  React.useEffect(() => {
+    window._dbgPush && window._dbgPush(`[bindings] widget render — champData=${!!champData} bindings=${Object.keys(bindings || {}).length}`);
+  }, [champData, bindings]);
 
   useEffect(() => {
     if (!listening) return;
@@ -2025,6 +2032,8 @@ const App = () => {
   const [champion, setChampion] = useState(null);
   const [patch, setPatch] = useState(null);
   const [champData, setChampData] = useState(null);
+  // 아이템 ID → { name, image } 매핑 (Data Dragon에서 패치별 fetch)
+  const [itemsMap, setItemsMap] = useState({});
   const [combos, setCombos] = useState(IS_OW ? [] : MOCK_COMBOS); // OW에서는 API 결과만
   const [playerStats, setPlayerStats] = useState(null); // null = 데이터 없음
   const [activeId, setActiveId] = useState(IS_OW ? null : MOCK_COMBOS[0]?.id);
@@ -2252,6 +2261,25 @@ const App = () => {
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
   }, [refreshCombos]);
+
+  // patch가 정해지면 한 번만 LoL 아이템 메타 (id → name, image) fetch
+  useEffect(() => {
+    if (!patch) return;
+    let cancelled = false;
+    fetch(`https://ddragon.leagueoflegends.com/cdn/${patch}/data/ko_KR/item.json`)
+      .then(r => r.ok ? r.json() : null)
+      .then(j => {
+        if (!j?.data || cancelled) return;
+        const map = {};
+        for (const [id, info] of Object.entries(j.data)) {
+          map[id] = { name: info.name, image: info.image?.full };
+        }
+        setItemsMap(map);
+        addDebug(`[items] ${Object.keys(map).length}개 로드됨 (patch ${patch})`);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [patch]);
 
   // OW: 오버레이 창을 게임 해상도에 맞게 자동 조정
   useEffect(() => {
@@ -3406,7 +3434,7 @@ const App = () => {
             {activeCombo?.difficulty?.toUpperCase()}
           </span>
         } />
-        <RequirementsWidget gameSpecific={comboDetail?.game_specific ?? activeCombo?.game_specific} playerStats={playerStats} patch={patch} />
+        <RequirementsWidget gameSpecific={comboDetail?.game_specific ?? activeCombo?.game_specific} playerStats={playerStats} patch={patch} itemsMap={itemsMap} />
         <ComboSequenceWidget
           combo={activeCombo} playMs={playMs} totalMs={TOTAL}
           score={score} lastQuality={lastQuality}
