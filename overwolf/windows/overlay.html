@@ -2341,8 +2341,21 @@ const App = () => {
 
   // 중앙 키 디스패처 — 매 렌더마다 갱신해 항상 최신 state/ref 참조
   // OW.onKeyDown(inputTracking)을 경유하므로 인게임 F8/F11/ESC 모두 캡처됨
+  // 핫키 디바운스 — Overwolf inputTracking은 키 hold 시 auto-repeat 이벤트 발생 가능
+  // (browser keydown의 e.repeat 같은 플래그 없음). 같은 핫키가 250ms 안에 두 번 오면 무시.
   useEffect(() => {
+    const lastHotkeyAt = { F8: 0, F11: 0, F12: 0, ESC: 0, F9: 0, F1: 0, F3: 0, F5: 0, F7: 0 };
+    const HOTKEY_DEBOUNCE_MS = 250;
     masterKeyRef.current = ({ key, t }) => {
+      // 디바운스: 토글성 핫키만 적용 (게임 입력 키는 영향 없음)
+      if (key in lastHotkeyAt) {
+        const now = performance.now();
+        if (now - lastHotkeyAt[key] < HOTKEY_DEBOUNCE_MS) {
+          window._dbgPush(`[KEY] ${key} 디바운스 무시 (${Math.round(now - lastHotkeyAt[key])}ms)`);
+          return;
+        }
+        lastHotkeyAt[key] = now;
+      }
       if (key === 'F8') {
         window._dbgPush('[KEY] F8 → 디버그 토글');
         setShowDebug(v => !v);
