@@ -2020,9 +2020,12 @@ const App = () => {
     // onStopStreaming 이벤트로 감지 — 디버그에 표시 + 우리 ref 정리.
     if (IS_OW && overwolf.streaming?.onStopStreaming) {
       overwolf.streaming.onStopStreaming.addListener((evt) => {
+        // 우리가 호출한 stop도 이 이벤트 발생시킴 — streamIdRef가 이미 null이면 우리 호출이라 무시
+        // (우리는 stop 호출 직전에 streamIdRef = null로 만들어서 이중 stop 방지함)
+        if (streamIdRef.current === null) return;
+        // 진짜 외부 종료
         const reason = evt?.is_resumable === false ? '강제 종료(복구 불가)' : '정지';
-        window._dbgPush(`[stream] 외부에서 ${reason} — id=${evt?.stream_id} reason=${evt?.reason || 'unknown'}`);
-        // 우리가 호출한 stop이 아니면 ref 정리
+        window._dbgPush(`[stream] ⚠ 외부에서 ${reason} — id=${evt?.stream_id} reason=${evt?.reason || 'unknown'}`);
         if (streamIdRef.current === evt?.stream_id) {
           streamIdRef.current = null;
         }
