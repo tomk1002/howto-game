@@ -779,8 +779,28 @@ const SourceBadge = ({ source }) => {
     </span>
   );
 };
-const ComboQueueWidget = ({ combos, activeId, onSelect }) => (
-  <div style={{ maxHeight:260, overflowY:'auto' }}>
+const ComboQueueWidget = ({ combos, activeId, onSelect, onRefresh }) => (
+  <div>
+    {/* 헤더 — 새로고침 버튼 */}
+    <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between',
+      padding:'4px 12px', borderBottom:'1px solid rgba(255,255,255,0.06)' }}>
+      <span style={{ fontFamily:'monospace', fontSize:10, color:'rgba(255,255,255,0.4)', letterSpacing:1 }}>
+        콤보 {combos.length > 0 ? `(${combos.length})` : ''}
+      </span>
+      {onRefresh && (
+        <div onClick={(e) => { e.stopPropagation(); onRefresh(); }}
+          onPointerDown={e => e.stopPropagation()}
+          title="콤보 목록 새로고침"
+          style={{ cursor:'pointer', fontSize:12, color:'rgba(0,200,255,0.55)',
+            padding:'2px 6px', borderRadius:4, userSelect:'none',
+            transition:'color 0.15s, background 0.15s' }}
+          onMouseEnter={e => { e.currentTarget.style.color = '#00d4ff'; e.currentTarget.style.background = 'rgba(0,200,255,0.08)'; }}
+          onMouseLeave={e => { e.currentTarget.style.color = 'rgba(0,200,255,0.55)'; e.currentTarget.style.background = 'transparent'; }}>
+          🔄
+        </div>
+      )}
+    </div>
+    <div style={{ maxHeight:260, overflowY:'auto' }}>
     {combos.length === 0 && (
       <div style={{ padding:'16px 14px', fontFamily:'monospace', fontSize:11,
         color:'rgba(255,255,255,0.4)', textAlign:'center', lineHeight:1.8 }}>
@@ -815,6 +835,7 @@ const ComboQueueWidget = ({ combos, activeId, onSelect }) => (
         </div>
       );
     })}
+    </div>
   </div>
 );
 
@@ -2195,6 +2216,43 @@ const App = () => {
     if (champRes) { setPatch(champRes.patch); setChampData(champRes.champ); }
   }, []);
 
+  // 콤보 리스트만 새로고침 (챔프 변경 없이) — 게시/저장 후 즉시 반영
+  const refreshCombos = useCallback(async () => {
+    const champ = championRef.current;
+    if (!champ?.id) return;
+    addDebug('[combos] 새로고침');
+    const next = await fetchCombos(champ.id, desktopTokenRef.current);
+    setCombos(next);
+    // 현재 active가 새 리스트에도 있으면 유지, 없으면 첫번째로
+    if (next.length === 0) {
+      setActiveId(null);
+    } else if (!next.find(c => c.id === activeIdRef.current)) {
+      setActiveId(next[0].id);
+    }
+  }, []);
+
+  // activeId의 최신 값을 ref로 (refreshCombos에서 사용)
+  const activeIdRef = useRef(null);
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+
+  // 60초마다 자동 새로고침 (챔피언 있을 때만)
+  useEffect(() => {
+    if (!champion) return;
+    const iv = setInterval(() => { refreshCombos(); }, 60000);
+    return () => clearInterval(iv);
+  }, [champion, refreshCombos]);
+
+  // 오버레이 윈도우가 활성화될 때 (alt+tab 복귀 등) 한 번 새로고침
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === 'visible' && championRef.current) {
+        refreshCombos();
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [refreshCombos]);
+
   // OW: 오버레이 창을 게임 해상도에 맞게 자동 조정
   useEffect(() => {
     if (!IS_OW) return;
@@ -3337,7 +3395,7 @@ const App = () => {
             background: champion ? '#00ffaa' : 'rgba(255,255,255,0.15)',
             boxShadow: champion ? '0 0 10px #00ffaa, 0 0 20px rgba(0,255,170,0.4)' : 'none' }} />
         </div>
-        <ComboQueueWidget combos={combos} activeId={activeId} onSelect={id=>{setActiveId(id);resetSession();}} />
+        <ComboQueueWidget combos={combos} activeId={activeId} onSelect={id=>{setActiveId(id);resetSession();}} onRefresh={refreshCombos} />
       </Widget>
 
       {/* 통합: 콤보 시퀀스 + 런 기록 */}
