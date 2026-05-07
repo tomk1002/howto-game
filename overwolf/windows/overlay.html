@@ -710,6 +710,29 @@ const Widget = ({ id, defaultPos, width, children, visible=true, scale=1 }) => {
   useEffect(() => { if (id) widgetStateMap.set(id + '_pos', pos); }, [id, pos]);
   useEffect(() => { if (id) widgetStateMap.set(id + '_size', size); }, [id, size]);
 
+  // 화면 해상도 변경(전체화면 ↔ 창모드 등) 시 비례 scale
+  useEffect(() => {
+    const onResize = (e) => {
+      const { sx, sy } = e.detail || {};
+      if (!sx || !sy) return;
+      setPos(p => ({ x: Math.round(p.x * sx), y: Math.round(p.y * sy) }));
+      setSize(s => ({ w: s.w ? Math.round(s.w * sx) : s.w, h: s.h ? Math.round(s.h * sy) : s.h }));
+    };
+    // 위치 리셋 (제어 센터에서 수동 트리거)
+    const onReset = () => {
+      if (id && widgetStateMap.has(id + '_pos')) widgetStateMap.delete(id + '_pos');
+      if (id && widgetStateMap.has(id + '_size')) widgetStateMap.delete(id + '_size');
+      setPos(defaultPos);
+      setSize({ w: width, h: null });
+    };
+    window.addEventListener('overlay-resize', onResize);
+    window.addEventListener('overlay-reset-positions', onReset);
+    return () => {
+      window.removeEventListener('overlay-resize', onResize);
+      window.removeEventListener('overlay-reset-positions', onReset);
+    };
+  }, [id, defaultPos, width]);
+
   // ── 드래그 이동 (헤더) — clientXY(시각)를 unscaled 좌표로 변환 ──────
   const onPointerDown = useCallback(e => {
     if (!e.target.closest('.wh')) return;
@@ -1678,6 +1701,19 @@ const ControlWidget = React.memo(({ show, onToggle, onHideAll, onShowAll, playSt
               {(!show.champion && !show.sequence && !show.bindings && !show.video && !show.recordLog && !showDebug) ? '◇ 전체 표시' : '◈ 전체 숨김'}
             </span>
           </div>
+          {/* 위치 초기화 — 해상도 변경 후 위젯이 어색하게 배치됐을 때 default로 복귀 */}
+          <div onPointerDown={e=>e.stopPropagation()}
+            onClick={() => window.dispatchEvent(new CustomEvent('overlay-reset-positions'))}
+            style={{
+              display:'flex', alignItems:'center', gap:10, padding:'6px 14px', cursor:'pointer',
+              background:'rgba(255,255,255,0.02)', userSelect:'none',
+            }}
+            onMouseEnter={e => e.currentTarget.style.background='rgba(120,180,255,0.06)'}
+            onMouseLeave={e => e.currentTarget.style.background='rgba(255,255,255,0.02)'}>
+            <span style={{ flex:1, fontSize:12, color:'rgba(120,180,255,0.7)', fontWeight:500 }}>
+              ↺ 위치 초기화
+            </span>
+          </div>
           <div style={{ height:1, background:'linear-gradient(90deg,transparent,rgba(255,30,60,0.3),transparent)', margin:'4px 14px' }} />
           {/* 녹화 버튼 */}
           <div onPointerDown={e=>e.stopPropagation()} onClick={onRecordToggle} style={{
@@ -2362,6 +2398,25 @@ const App = () => {
   // activeId의 최신 값을 ref로 (refreshCombos에서 사용)
   const activeIdRef = useRef(null);
   useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
+
+  // 화면 해상도 변경 감지 (전체화면 ↔ 창모드, 모니터 변경 등) → 모든 위젯에 비례 scale 이벤트
+  useEffect(() => {
+    let prevW = window.innerWidth, prevH = window.innerHeight;
+    const onResize = () => {
+      const newW = window.innerWidth, newH = window.innerHeight;
+      if (newW === prevW && newH === prevH) return;
+      const sx = newW / prevW;
+      const sy = newH / prevH;
+      // 1% 이상 변할 때만 — 미세 변화 무시
+      if (Math.abs(sx - 1) > 0.01 || Math.abs(sy - 1) > 0.01) {
+        window._dbgPush(`[resize] ${prevW}x${prevH} → ${newW}x${newH} (sx=${sx.toFixed(2)} sy=${sy.toFixed(2)})`);
+        window.dispatchEvent(new CustomEvent('overlay-resize', { detail: { sx, sy } }));
+      }
+      prevW = newW; prevH = newH;
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   // 60초마다 자동 새로고침 (챔피언 있을 때만)
   useEffect(() => {
