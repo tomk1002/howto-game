@@ -2149,9 +2149,9 @@ function autoDetectSteps(inputs, durationMs, gapThreshold = 400) {
 
 // ── 디버그 패널 (드래그 가능, 우측 중간 기본 위치) ─────────────────
 const DebugPanelDraggable = ({ children }) => {
-  // 우측 영역 — video는 우측 상단 모서리, debug는 그 아래쯤 (vw*0.65)
+  // 화면 중앙 부근 (이전 vw*0.65 / vw - 400은 우측으로 너무 밀려서 듀얼/창모드에서 안 보임)
   const [pos, setPos] = useState(() => ({
-    x: Math.round(window.innerWidth * 0.65),
+    x: Math.round(window.innerWidth * 0.50),
     y: Math.round(window.innerHeight * 0.40),
   }));
   const onPointerDown = useCallback((e) => {
@@ -2908,9 +2908,10 @@ const App = () => {
               settings: {
                 audio: { mic: { enable: false }, game: { enable: true } },
                 video: {
-                  auto_calc_kbps: false, // 명시적 bitrate 사용 (auto는 너무 보수적이라 1Mbps 정도로 떨어짐)
-                  kbps: 6000, // 1080p 기준 적절한 화질 (~6Mbps). 720p면 4000도 OK
-                  fps: 30,
+                  auto_calc_kbps: false,
+                  kbps: 10000, // 1080p 60fps 기준 ~10Mbps
+                  fps: 60, // 더 부드러운 재생
+                  encoder: { name: 'INTEL_QUICK_SYNC', config: { preset: 'BALANCED' } }, // 가능 시 하드웨어 인코더 우선
                   width: 0, height: 0, // 0 = 게임 해상도 자동
                   buffer_length: 0, // 과거 버퍼 사용 안 함
                   sub_folder_name: 'ComboGG',
@@ -3533,7 +3534,7 @@ const App = () => {
       sequence:  { x: u(vw * 0.32), y: u(20) },
       bindings:  { x: u(vw - 320),  y: u(vh * 0.42) },
       control:   { x: u(60),        y: u(vh * 0.40) }, // champion과 같은 x
-      video:     { x: u(vw - 420),  y: u(20) }, // 우측 상단 모서리
+      video:     { x: u(vw * 0.50), y: u(20) }, // 화면 중앙 부근, 400w
       recordLog: { x: u(60),        y: u(vh * 0.28) },
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
