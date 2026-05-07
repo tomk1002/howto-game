@@ -824,7 +824,7 @@ const SourceBadge = ({ source }) => {
     </span>
   );
 };
-const ComboQueueWidget = ({ combos, activeId, onSelect, onRefresh }) => (
+const ComboQueueWidget = React.memo(({ combos, activeId, onSelect, onRefresh }) => (
   <div>
     {/* 헤더 — 새로고침 버튼 */}
     <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between',
@@ -882,7 +882,7 @@ const ComboQueueWidget = ({ combos, activeId, onSelect, onRefresh }) => (
     })}
     </div>
   </div>
-);
+));
 
 // ── 3. 콤보 조건 체크 ───────────────────────────────────────────
 const ReqChip = ({ label, met, iconUrl, noData }) => {
@@ -1720,7 +1720,7 @@ const ControlWidget = ({ show, onToggle, playState, onPlayToggle, loopMode, onLo
 };
 
 // ── 7. 참고 영상 위젯 ────────────────────────────────────────────
-const VideoWidget = ({ videoUrl, visible, defaultPos, scale }) => {
+const VideoWidget = React.memo(({ videoUrl, visible, defaultPos, scale }) => {
   const videoRef = useRef(null);
   if (!videoUrl) return null;
   return (
@@ -1750,7 +1750,7 @@ const VideoWidget = ({ videoUrl, visible, defaultPos, scale }) => {
       />
     </Widget>
   );
-};
+});
 
 // ── 공유 상태 표시 (Draft 업로드 → 브라우저 편집) ────────────────────
 // shareState statuses:
@@ -2140,8 +2140,19 @@ const App = () => {
 
   // 전역 debug 콜백 연결 — fetchCombos 등 React 밖 코드도 패널에 반영됨
   useEffect(() => {
-    window._dbgCallback = (lines) => setDebugLog([...lines]);
-    return () => { window._dbgCallback = null; };
+    // 디버그 로그 state 업데이트는 200ms 디바운스 — 짧은 시간에 여러 번 push 와도 한 번만 re-render
+    let dbgTimer = null;
+    window._dbgCallback = () => {
+      if (dbgTimer) return;
+      dbgTimer = setTimeout(() => {
+        dbgTimer = null;
+        setDebugLog([...window._dbgLines]);
+      }, 200);
+    };
+    return () => {
+      if (dbgTimer) clearTimeout(dbgTimer);
+      window._dbgCallback = null;
+    };
   }, []);
 
   // ── 마운트 시 state.json 복원 + 리플레이 버퍼 초기화 ────────────────
@@ -2841,9 +2852,9 @@ const App = () => {
           handled = true;
           const rawSnapshot = payload?.snapshot;
           // 디버그: 실제 OW가 주는 raw 구조 확인 (아이템 등 필드 경로 검증용)
+          // raw snapshot은 너무 길어서 디버그 패널 state에 넣지 않고 console로만 출력 (perf)
           try {
-            const rawStr = JSON.stringify(rawSnapshot).slice(0, 1500);
-            window._dbgPush('[snapshot-raw] ' + rawStr);
+            console.log('[CGG][snapshot-raw]', rawSnapshot);
           } catch(e) {}
           const gameSnapshot = parseLolSnapshot(rawSnapshot);
           window._dbgPush('[snapshot-parsed] level=' + gameSnapshot?.required_level + ' items=' + JSON.stringify(gameSnapshot?.required_items) + ' summoners=' + JSON.stringify(gameSnapshot?.summoner_spells));
