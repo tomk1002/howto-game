@@ -2042,7 +2042,7 @@ const App = () => {
   const [score, setScore] = useState(0);
   const [lastQuality, setLastQuality] = useState(null);
   const [showDebug, setShowDebug] = useState(IS_OW); // Overwolf에서는 기본 표시
-  const [widgetScale, setWidgetScale] = useState(0.80); // 전체 위젯 스케일
+  const [widgetScale, setWidgetScale] = useState(1.0); // 전체 위젯 스케일 (기본 100%)
   const [debugLog, setDebugLog] = useState([]);
 
   // ── 미리보기 state ─────────────────────────────────────────────
@@ -3222,7 +3222,7 @@ const App = () => {
       champion:  { x: u(100),       y: u(20) },
       sequence:  { x: u(vw * 0.32), y: u(20) },
       bindings:  { x: u(vw - 320),  y: u(vh * 0.42) },
-      control:   { x: u(100),       y: u(vh * 0.55) }, // LoL HUD(하단 ~vh*0.78~) 위, recordLog(0.28) 아래
+      control:   { x: u(100),       y: u(vh * 0.48) }, // LoL HUD(하단 ~vh*0.78~) 위, recordLog(0.28) 아래
       video:     { x: u(vw * 0.55), y: u(20) },
       recordLog: { x: u(100),       y: u(vh * 0.28) }, // 챔피언 아래, 컨트롤(0.62) 위
     };
