@@ -1985,9 +1985,9 @@ function autoDetectSteps(inputs, durationMs, gapThreshold = 400) {
 
 // ── 디버그 패널 (드래그 가능, 우측 중간 기본 위치) ─────────────────
 const DebugPanelDraggable = ({ children }) => {
-  // 우측 중단 기본 (LoL 미니맵 위, HUD 위) — 사용자가 명시 요청한 위치
+  // 영상(video) 위젯과 같은 x로 정렬 — 사용자 요청
   const [pos, setPos] = useState(() => ({
-    x: Math.max(20, window.innerWidth - 400),
+    x: Math.round(window.innerWidth * 0.40),
     y: Math.round(window.innerHeight * 0.32),
   }));
   const onPointerDown = useCallback((e) => {
@@ -3222,8 +3222,8 @@ const App = () => {
       champion:  { x: u(100),       y: u(20) },
       sequence:  { x: u(vw * 0.32), y: u(20) },
       bindings:  { x: u(vw - 320),  y: u(vh * 0.42) },
-      control:   { x: u(100),       y: u(vh * 0.48) }, // LoL HUD(하단 ~vh*0.78~) 위, recordLog(0.28) 아래
-      video:     { x: u(vw * 0.55), y: u(20) },
+      control:   { x: u(100),       y: u(vh * 0.40) }, // LoL HUD(하단 ~vh*0.78~) 위, recordLog(0.28) 아래
+      video:     { x: u(vw * 0.40), y: u(20) }, // top, 좌측 쪽 (사용자 요청), 400w
       recordLog: { x: u(100),       y: u(vh * 0.28) }, // 챔피언 아래, 컨트롤(0.62) 위
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -3360,7 +3360,7 @@ const App = () => {
         visibility: (recordCountNum !== null || recordState === 'recording') ? 'hidden' : 'visible' }}>
 
       {/* 통합: 챔피언 + 콤보 목록 */}
-      <Widget defaultPos={DEFAULT.champion} width={240} visible={show.champion} scale={widgetScale}>
+      <Widget defaultPos={DEFAULT.champion} width={360} visible={show.champion} scale={widgetScale}>
         <div className="wh" style={{
           display:'flex', alignItems:'center', gap:12, padding:'12px 16px',
           borderBottom:'1px solid rgba(0,190,255,0.12)',
