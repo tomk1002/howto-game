@@ -2016,6 +2016,18 @@ const App = () => {
     // 이전에는 media.replays.turnOn으로 60초 ringbuffer 돌렸음 — 비효율적이라 제거.
     // 이제 startRecord(카운트다운 끝) 시점에 streaming.start, stopRecord 시 streaming.stop.
     // 시작/정지가 명확하므로 streaming API가 정답.
+    // Overwolf가 외부 요인(게임 종료, 다른 앱이 capture, quota 초과 등)으로 stream을 강제 종료하면
+    // onStopStreaming 이벤트로 감지 — 디버그에 표시 + 우리 ref 정리.
+    if (IS_OW && overwolf.streaming?.onStopStreaming) {
+      overwolf.streaming.onStopStreaming.addListener((evt) => {
+        const reason = evt?.is_resumable === false ? '강제 종료(복구 불가)' : '정지';
+        window._dbgPush(`[stream] 외부에서 ${reason} — id=${evt?.stream_id} reason=${evt?.reason || 'unknown'}`);
+        // 우리가 호출한 stop이 아니면 ref 정리
+        if (streamIdRef.current === evt?.stream_id) {
+          streamIdRef.current = null;
+        }
+      });
+    }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── 토큰 퍼시스턴스 헬퍼 ────────────────────────────────────────
@@ -2645,7 +2657,16 @@ const App = () => {
       if (recordStateRef.current !== 'recording') return;
       recordInputsRef.current = [];
       setRecordState('idle');
-      window._dbgPush('[REC] 취소');
+      // 활성 스트림 있으면 같이 정지 (이전엔 누락돼서 ESC 후 stream이 디스크에 계속 기록되는 버그였음)
+      if (IS_OW && streamIdRef.current !== null && overwolf.streaming) {
+        const sid = streamIdRef.current;
+        streamIdRef.current = null;
+        overwolf.streaming.stop(sid, (res) => {
+          window._dbgPush('[REC] 취소 + stream 정리: ' + (res?.success ? 'OK' : 'fail'));
+        });
+      } else {
+        window._dbgPush('[REC] 취소');
+      }
     };
   }); // no deps
 
