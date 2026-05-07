@@ -1577,7 +1577,7 @@ const LOOP_OPTS = [
   { id:'inf',  label:'무한' },
 ];
 
-const ControlWidget = ({ show, onToggle, playState, onPlayToggle, loopMode, onLoopChange, widgetScale, onScaleChange, showDebug, onToggleDebug, recordState, onRecordToggle, onRecordCancel }) => {
+const ControlWidget = ({ show, onToggle, onHideAll, onShowAll, playState, onPlayToggle, loopMode, onLoopChange, widgetScale, onScaleChange, showDebug, onToggleDebug, recordState, onRecordToggle, onRecordCancel }) => {
   const [expanded, setExpanded] = useState(true);
   return (
     <div>
@@ -1614,6 +1614,24 @@ const ControlWidget = ({ show, onToggle, playState, onPlayToggle, loopMode, onLo
           <Toggle on={show.video}      onClick={()=>onToggle('video')}     label="참고 영상"   hotkey="F7" />
           <Toggle on={show.recordLog}  onClick={()=>onToggle('recordLog')} label="녹화 로그"   hotkey="" />
           <Toggle on={showDebug}       onClick={onToggleDebug}             label="디버그"      hotkey="F8" />
+          {/* 전체 숨김/표시 — 제어 센터 자체는 안 숨김 */}
+          <div onPointerDown={e=>e.stopPropagation()}
+            onClick={() => {
+              const allHidden = !show.champion && !show.sequence && !show.bindings && !show.video && !show.recordLog && !showDebug;
+              if (allHidden) onShowAll?.();
+              else onHideAll?.();
+            }}
+            style={{
+              display:'flex', alignItems:'center', gap:10, padding:'6px 14px', cursor:'pointer',
+              background:'rgba(255,255,255,0.02)', userSelect:'none', marginTop:2,
+              borderTop:'1px solid rgba(255,255,255,0.05)',
+            }}
+            onMouseEnter={e => e.currentTarget.style.background='rgba(255,200,80,0.06)'}
+            onMouseLeave={e => e.currentTarget.style.background='rgba(255,255,255,0.02)'}>
+            <span style={{ flex:1, fontSize:12, color:'rgba(255,200,80,0.85)', fontWeight:600 }}>
+              {(!show.champion && !show.sequence && !show.bindings && !show.video && !show.recordLog && !showDebug) ? '◇ 전체 표시' : '◈ 전체 숨김'}
+            </span>
+          </div>
           <div style={{ height:1, background:'linear-gradient(90deg,transparent,rgba(255,30,60,0.3),transparent)', margin:'4px 14px' }} />
           {/* 녹화 버튼 */}
           <div onPointerDown={e=>e.stopPropagation()} onClick={onRecordToggle} style={{
@@ -2082,6 +2100,7 @@ const DebugPanelDraggable = ({ children }) => {
 // ── 메인 앱 ─────────────────────────────────────────────────────
 const App = () => {
   const [champion, setChampion] = useState(null);
+  const [isTFT, setIsTFT] = useState(false); // 롤체(TFT) 모드 감지 시 오버레이 비활성화
   const [patch, setPatch] = useState(null);
   const [champData, setChampData] = useState(null);
   // 아이템 ID → { name, image } 매핑 (Data Dragon에서 패치별 fetch)
@@ -2324,6 +2343,38 @@ const App = () => {
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
   }, [refreshCombos]);
+
+  // ── TFT(롤체) 감지: 15초마다 game_info.queueId 확인. TFT면 오버레이 비활성 ──────
+  // 로컬 Riot API의 /liveclientdata/gamestats가 가장 정확 (gameMode 직접 반환)
+  useEffect(() => {
+    if (!IS_OW) return;
+    let cancelled = false;
+    const checkMode = async () => {
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 3000);
+        const r = await fetch('https://127.0.0.1:2999/liveclientdata/gamestats', { signal: ctrl.signal });
+        clearTimeout(timer);
+        if (!r.ok || cancelled) return;
+        const data = await r.json();
+        // gameMode: "CLASSIC" / "ARAM" / "TFT" / "URF" / "PRACTICETOOL" 등
+        const mode = data?.gameMode || '';
+        const tftDetected = /TFT|TUTORIAL_TFT|TEAMFIGHT/i.test(mode);
+        if (cancelled) return;
+        setIsTFT(prev => {
+          if (prev !== tftDetected) {
+            window._dbgPush(`[mode] ${tftDetected ? 'TFT 감지 — 오버레이 비활성' : 'LoL 모드'} (gameMode=${mode})`);
+          }
+          return tftDetected;
+        });
+      } catch (e) {
+        // 게임 안 시작했거나 endpoint 못 닿음 — 무시
+      }
+    };
+    checkMode();
+    const iv = setInterval(checkMode, 15000);
+    return () => { cancelled = true; clearInterval(iv); };
+  }, []);
 
   // patch가 정해지면 한 번만 LoL 아이템 메타 (id → name, image) fetch
   useEffect(() => {
@@ -3449,9 +3500,18 @@ const App = () => {
       </div>
 
       {/* 전체 위젯 스케일 컨테이너 — control center의 +/− 로 조절 */}
-      {/* 녹화 카운트다운 중 또는 녹화 중에는 숨김 — past 60초 버퍼에 깨끗한 게임 footage 들어가게 */}
+      {/* TFT 모드 시 안내 banner */}
+      {isTFT && (
+        <div style={{ position:'fixed', top:8, left:'50%', transform:'translateX(-50%)',
+          padding:'5px 14px', borderRadius:14, zIndex:200, pointerEvents:'auto',
+          background:'rgba(20,15,5,0.85)', border:'1px solid rgba(255,200,80,0.4)',
+          fontFamily:'monospace', fontSize:11, color:'rgba(255,210,120,0.85)' }}>
+          🎲 롤체 모드 — combo.gg 비활성
+        </div>
+      )}
+      {/* 녹화 카운트다운/녹화 중/TFT 모드에는 모든 위젯 숨김 */}
       <div style={{ position:'absolute', inset:0, zoom: widgetScale,
-        visibility: (recordCountNum !== null || recordState === 'recording') ? 'hidden' : 'visible' }}>
+        visibility: (recordCountNum !== null || recordState === 'recording' || isTFT) ? 'hidden' : 'visible' }}>
 
       {/* 통합: 챔피언 + 콤보 목록 */}
       <Widget defaultPos={DEFAULT.champion} width={360} visible={show.champion} scale={widgetScale}>
@@ -3548,6 +3608,8 @@ const App = () => {
       <Widget defaultPos={DEFAULT.control} width={220} scale={widgetScale}>
         <ControlWidget
           show={show} onToggle={toggleShow}
+          onHideAll={() => { setShow({ champion:false, sequence:false, bindings:false, video:false, recordLog:false }); setShowDebug(false); }}
+          onShowAll={() => { setShow({ champion:true, sequence:true, bindings:true, video:true, recordLog:true }); }}
           playState={playState} onPlayToggle={() => togglePlayRef.current?.()}
           loopMode={loopMode} onLoopChange={m=>{setLoopMode(m);runCountRef.current=0;}}
           widgetScale={widgetScale} onScaleChange={setWidgetScale}
