@@ -424,7 +424,50 @@ function normalizeCombo(c) {
 // ── .tutfile Blob 생성 공유 헬퍼 ────────────────────────────────────
 // handleDownload 와 handleShare 양쪽에서 재사용
 // take 파라미터가 있으면 videoBytes를 ZIP에 포함
-window.buildTutfileBlob = ({ title, description, difficulty, tags, characterId, characterName, inputs, patch, take }) => {
+// 쿨타임 기반 dedup — 같은 스킬 키를 effective cooldown 안에 또 누르면 mash로 간주, 제거
+// champData: Data Dragon 챔프 (spells[i].cooldown 배열 5개)
+// take.gameSnapshot.required_skills: Q/W/E/R 레벨
+// take.gameSnapshot.ability_haste_min: 스킬 가속 (0~)
+// 비-스킬 키(평타, 아이템, 소환사)는 100ms 이내 같은 키 중복만 안전망으로 제거
+function dedupeByCooldown(rawInputs, take, champData) {
+  const skillLevels = take?.gameSnapshot?.required_skills || {};
+  const ah = Number(take?.gameSnapshot?.ability_haste_min) || 0;
+  const cdMul = 1 / (1 + ah / 100); // ability haste 적용
+  const cdBySlot = {}; // ms 단위
+  if (champData?.spells) {
+    ['Q','W','E','R'].forEach((slot, i) => {
+      const arr = champData.spells[i]?.cooldown;
+      if (!Array.isArray(arr) || arr.length === 0) return;
+      const lvl = skillLevels[slot] || 1;
+      const idx = Math.min(arr.length - 1, Math.max(0, lvl - 1));
+      const baseSec = arr[idx];
+      if (typeof baseSec === 'number' && baseSec > 0) {
+        cdBySlot[slot] = baseSec * 1000 * cdMul;
+      }
+    });
+  }
+  const lastT = {}; // key → last accepted t
+  const result = [];
+  let removed = 0;
+  for (const inp of rawInputs) {
+    const key = (inp.key || '').toUpperCase();
+    const cd = cdBySlot[key]; // 스킬 키만 정의됨
+    const minGap = cd != null ? cd : 100; // 비-스킬은 100ms safety net
+    const last = lastT[key];
+    if (last !== undefined && inp.t - last < minGap) {
+      removed++;
+      continue;
+    }
+    lastT[key] = inp.t;
+    result.push(inp);
+  }
+  if (removed > 0) {
+    window._dbgPush && window._dbgPush(`[dedup] ${removed}개 mash 제거 (${rawInputs.length} → ${result.length})`);
+  }
+  return result;
+}
+
+window.buildTutfileBlob = ({ title, description, difficulty, tags, characterId, characterName, inputs, patch, take, champData }) => {
   const now = new Date().toISOString();
   const durationMs = take?.durationMs
     ?? (inputs.length ? inputs[inputs.length - 1].t + 200 : 0);
@@ -487,7 +530,9 @@ window.buildTutfileBlob = ({ title, description, difficulty, tags, characterId, 
     return out;
   }
 
-  const inputsJson = { inputs: inputs.map(classifyInput) };
+  // 쿨타임 기반 자동 mash 제거 (champData 있을 때만 정확한 쿨, 없으면 100ms safety만)
+  const cleanedInputs = dedupeByCooldown(inputs, take, champData);
+  const inputsJson = { inputs: cleanedInputs.map(classifyInput) };
   const stepsData = take?.steps?.length > 0 ? take.steps : [];
   const stepsJson = { steps: stepsData };
 
@@ -508,9 +553,9 @@ window.buildTutfileBlob = ({ title, description, difficulty, tags, characterId, 
 };
 
 // ── 녹화 .tutfile 로컬 다운로드 ───────────────────────────────────
-window.downloadTutfile = ({ title, difficulty, characterId, characterName, inputs, patch }) => {
+window.downloadTutfile = ({ title, difficulty, characterId, characterName, inputs, patch, take, champData }) => {
   try {
-    const blob = window.buildTutfileBlob({ title, difficulty, characterId, characterName, inputs, patch });
+    const blob = window.buildTutfileBlob({ title, difficulty, characterId, characterName, inputs, patch, take, champData });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -2860,6 +2905,8 @@ const App = () => {
       characterName: champion.name,
       inputs: take.inputs,
       patch,
+      take, // 쿨타임 dedup용 gameSnapshot 포함
+      champData,
     });
     if (result.ok) {
       setDownloadState('저장 완료 — 웹 페이지에서 업로드하세요');
@@ -3009,6 +3056,7 @@ const App = () => {
         inputs: workingTake.inputs,
         patch,
         take: workingTake,
+        champData, // 쿨타임 dedup용
       });
       // 진단: zip blob에 video.mp4가 정말 들어갔는지 크기로 검증
       // 7-8MB 가까우면 video 포함, 1KB 안팎이면 video 누락
